@@ -1,0 +1,6 @@
+{
+  "name": "Hardware Shop Manager",
+  "description": "Mobile-first hardware shop management app for inventory, billing, material estimates, and customer credit tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

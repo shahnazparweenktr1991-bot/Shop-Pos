@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 230" fill="none" className="w-full h-full">
+  <!-- Outer Hexagonal Frame -->
+  <polygon points="100,6 186,55 186,155 100,204 14,155 14,55" fill="#143d66" stroke="#143d66" stroke-width="4" stroke-linejoin="round"/>
+  
+  <!-- Inner Hexagonal Inset Border -->
+  <polygon points="100,16 176,60 176,150 100,194 24,150 24,60" fill="#ffffff" />
+  
+  <!-- Outer Hexagonal Core -->
+  <polygon points="100,24 170,64 170,146 100,186 30,146 30,64" fill="#143d66" />
+  
+  <!-- White Inner Cutout / Negative Space -->
+  <polygon points="100,32 162,68 162,142 100,178 38,142 38,68" fill="#ffffff" />
+  
+  <!-- Monogram Glyph: "A" with Claw Hammer Silhouette + "K" -->
+  <!-- Left Side: Stylized "A" with integrated hammer graphic -->
+  <path d="M 44,72 L 95,72 L 95,168 L 78,168 L 78,135 L 70,135 L 70,168 L 44,168 Z" fill="#143d66"/>
+  <!-- Cutouts inside "A" to reveal Hammer -->
+  <path d="M 60,88 L 82,88 L 82,108 L 60,108 Z" fill="#ffffff"/>
+  <!-- Hammer Silhouette inside the A's crossbar -->
+  <path d="M 46,112 C 50,106 58,106 63,110 L 89,110 L 89,122 L 63,122 C 58,126 50,126 46,120 Z" fill="#ffffff"/>
+  
+  <!-- Right Side: Stylized "K" -->
+  <path d="M 103,72 L 122,72 L 122,108 L 146,72 L 160,72 L 132,114 L 161,168 L 146,168 L 122,122 L 122,168 L 103,168 Z" fill="#143d66"/>
+</svg>
