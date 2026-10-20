@@ -1,3 +1,8 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { 
   createUserWithEmailAndPassword, 
   signInWithEmailAndPassword, 
@@ -5,6 +10,7 @@ import {
   GoogleAuthProvider,
   signOut as firebaseSignOut, 
   onAuthStateChanged,
+  sendPasswordResetEmail,
   User 
 } from 'firebase/auth';
 import { 
@@ -13,16 +19,24 @@ import {
   setDoc, 
   getDoc,
   getDocs,
-  query,
-  orderBy,
-  limit,
   deleteDoc, 
   onSnapshot, 
   Unsubscribe 
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../firebase';
-import { ShopStorage } from './storage';
-import { Product, Sale, Contact, Professional, Category, Purchase, Payment, Expense, MaterialEstimate } from '../types';
+import { ShopStorage, isSampleRecord } from './storage';
+import { 
+  Product, 
+  Sale, 
+  Contact, 
+  Professional, 
+  Category, 
+  Purchase, 
+  Payment, 
+  Expense, 
+  MaterialEstimate,
+  SyncDiagnosticInfo 
+} from '../types';
 
 export interface UserProfile {
   id: string;
@@ -32,81 +46,127 @@ export interface UserProfile {
 }
 
 export type SyncStatus = 'idle' | 'syncing' | 'synced' | 'error' | 'offline';
+export type AuthState = 'initializing' | 'signedOut' | 'loadingAccount' | 'ready' | 'error';
 
 type SyncListener = (status: SyncStatus, lastSync: string | null, error?: string) => void;
+type AuthListener = (user: UserProfile | null, authState: AuthState) => void;
 
 class CloudSyncService {
   private syncListeners: SyncListener[] = [];
+  private authListeners: AuthListener[] = [];
   private currentStatus: SyncStatus = 'idle';
+  private authStatus: AuthState = 'initializing';
   private currentError: string | null = null;
   private currentUser: UserProfile | null = null;
   private unsubscribes: Unsubscribe[] = [];
   private onDataUpdatedCallback: (() => void) | null = null;
+  private pendingWritesCount: number = 0;
+  private initialHydrationComplete: boolean = false;
+  private isOnline: boolean = typeof navigator !== 'undefined' ? navigator.onLine : true;
+  private isApplyingRemoteUpdate: boolean = false;
+  private currentMutationHandler: ((action: 'upsert' | 'delete', col: string, id: string, data?: any) => void) | null = null;
 
   constructor() {
     if (typeof window !== 'undefined') {
-      // Restore user cache if available
-      try {
-        const cached = localStorage.getItem('ak_auth_user_v1');
-        if (cached) {
-          this.currentUser = JSON.parse(cached);
-        }
-      } catch {}
-
-      // Listen for Firebase Auth changes
-      onAuthStateChanged(auth, async (firebaseUser) => {
-        if (firebaseUser) {
-          const profile: UserProfile = {
-            id: firebaseUser.uid,
-            email: firebaseUser.email || '',
-            name: firebaseUser.displayName || 'Shop Owner',
-            shopName: localStorage.getItem('ak_shop_name') || 'Hardware & Paints Store',
-          };
-          this.currentUser = profile;
-          localStorage.setItem('ak_auth_user_v1', JSON.stringify(profile));
-          localStorage.setItem('ak_auth_token_v1', firebaseUser.uid);
-
-          this.notify('syncing');
-          this.attachLiveListeners(firebaseUser.uid);
-        } else {
-          this.detachLiveListeners();
-          this.currentUser = null;
-          localStorage.removeItem('ak_auth_user_v1');
-          localStorage.removeItem('ak_auth_token_v1');
-          this.notify('idle');
-        }
-      });
-
       window.addEventListener('online', () => {
+        this.isOnline = true;
         if (this.currentUser) {
           this.notify('synced');
-          this.pushToCloud().catch(() => {});
         }
       });
 
       window.addEventListener('offline', () => {
+        this.isOnline = false;
         this.notify('offline', 'Device is offline. Changes saved locally.');
+      });
+
+      // Single authoritative Firebase Auth-State observer
+      onAuthStateChanged(auth, async (firebaseUser: User | null) => {
+        if (firebaseUser) {
+          this.authStatus = 'loadingAccount';
+          this.notifyAuthChange();
+
+          const profile: UserProfile = {
+            id: firebaseUser.uid,
+            email: firebaseUser.email || '',
+            name: firebaseUser.displayName || 'Shop Owner',
+            shopName: localStorage.getItem(`ak_${firebaseUser.uid}_shop_name`) || localStorage.getItem('ak_shop_name') || 'Hardware & Paints Store',
+          };
+          this.currentUser = profile;
+
+          // Scope local storage strictly to this authenticated UID
+          ShopStorage.setActiveNamespace(firebaseUser.uid);
+
+          // Perform initial hydration from cloud
+          await this.hydrateFromCloud(firebaseUser.uid);
+
+          // Hook local storage mutations to Firestore single-doc writes
+          this.currentMutationHandler = (action, col, id, data) => {
+            this.handleLocalMutation(firebaseUser.uid, action, col, id, data);
+          };
+          ShopStorage.registerMutationListener(this.currentMutationHandler);
+
+          // Attach real-time Firestore listeners for multi-device live sync
+          this.attachLiveListeners(firebaseUser.uid);
+
+          this.authStatus = 'ready';
+          this.notifyAuthChange();
+          this.recordSyncTime();
+          this.notify('synced');
+        } else {
+          this.detachLiveListeners();
+          this.currentMutationHandler = null;
+          ShopStorage.registerMutationListener(null);
+          this.currentUser = null;
+          ShopStorage.setActiveNamespace(null);
+          this.initialHydrationComplete = false;
+          this.authStatus = 'signedOut';
+          this.notifyAuthChange();
+          this.notify('idle');
+          this.triggerDataUpdate();
+        }
       });
     }
   }
 
-  public registerDataUpdateListener(cb: () => void) {
-    this.onDataUpdatedCallback = cb;
+  // --- Auth & Sync Listeners ---
+  public subscribeAuth(listener: AuthListener): () => void {
+    this.authListeners.push(listener);
+    listener(this.currentUser, this.authStatus);
+    return () => {
+      this.authListeners = this.authListeners.filter(l => l !== listener);
+    };
   }
 
   public subscribe(listener: SyncListener): () => void {
     this.syncListeners.push(listener);
     listener(this.currentStatus, this.getLastSyncTime(), this.currentError || undefined);
     return () => {
-      this.syncListeners = this.syncListeners.filter((l) => l !== listener);
+      this.syncListeners = this.syncListeners.filter(l => l !== listener);
     };
+  }
+
+  public registerDataUpdateListener(cb: () => void) {
+    this.onDataUpdatedCallback = cb;
   }
 
   private notify(status: SyncStatus, error?: string) {
     this.currentStatus = status;
     this.currentError = error || null;
     const lastSync = this.getLastSyncTime();
-    this.syncListeners.forEach((listener) => listener(status, lastSync, error));
+    this.syncListeners.forEach(listener => listener(status, lastSync, error));
+  }
+
+  private notifyAuthChange() {
+    this.authListeners.forEach(listener => listener(this.currentUser, this.authStatus));
+  }
+
+  public getAuthStatus(): AuthState {
+    return this.authStatus;
+  }
+
+  public getStatus(): SyncStatus {
+    return this.currentStatus;
   }
 
   public isLoggedIn(): boolean {
@@ -117,26 +177,29 @@ class CloudSyncService {
     return this.currentUser;
   }
 
-  public getToken(): string | null {
-    return auth.currentUser ? auth.currentUser.uid : null;
-  }
-
-  public getStatus(): SyncStatus {
-    return this.currentStatus;
-  }
-
   public getLastSyncTime(): string | null {
     try {
-      return localStorage.getItem('ak_last_sync_v1');
+      const uid = this.currentUser?.id;
+      return uid ? localStorage.getItem(`ak_${uid}_last_sync`) : null;
     } catch {
       return null;
     }
   }
 
+  private recordSyncTime() {
+    try {
+      const uid = this.currentUser?.id;
+      if (uid) {
+        localStorage.setItem(`ak_${uid}_last_sync`, new Date().toISOString());
+      }
+    } catch {}
+  }
+
   public isAutoSyncEnabled(): boolean {
     try {
-      const val = localStorage.getItem('ak_auto_sync_v1');
-      return val !== 'false';
+      const uid = this.currentUser?.id;
+      const key = uid ? `ak_${uid}_auto_sync` : 'ak_auto_sync';
+      return localStorage.getItem(key) !== 'false';
     } catch {
       return true;
     }
@@ -144,11 +207,223 @@ class CloudSyncService {
 
   public setAutoSyncEnabled(enabled: boolean): void {
     try {
-      localStorage.setItem('ak_auto_sync_v1', String(enabled));
+      const uid = this.currentUser?.id;
+      const key = uid ? `ak_${uid}_auto_sync` : 'ak_auto_sync';
+      localStorage.setItem(key, String(enabled));
     } catch {}
   }
 
-  // --- 1. ROBUST EMAIL & GOOGLE AUTHENTICATION ---
+  // --- Initial Cloud Hydration ---
+  private async hydrateFromCloud(uid: string): Promise<void> {
+    try {
+      this.notify('syncing');
+
+      // Helper to fetch collection
+      const fetchCol = async <T>(colName: string): Promise<T[]> => {
+        try {
+          const snap = await getDocs(collection(db, 'users', uid, colName));
+          const list: T[] = [];
+          snap.forEach(d => list.push(d.data() as T));
+          return list;
+        } catch (e) {
+          console.warn(`Hydration read failed for ${colName}:`, e);
+          return [];
+        }
+      };
+
+      const [products, sales, contacts, purchases, payments, expenses, estimates, professionals, categories] = await Promise.all([
+        fetchCol<Product>('products'),
+        fetchCol<Sale>('sales'),
+        fetchCol<Contact>('contacts'),
+        fetchCol<Purchase>('purchases'),
+        fetchCol<Payment>('payments'),
+        fetchCol<Expense>('expenses'),
+        fetchCol<MaterialEstimate>('estimates'),
+        fetchCol<Professional>('professionals'),
+        fetchCol<Category>('categories'),
+      ]);
+
+      // If cloud has business data, load it as authoritative
+      const totalDocs = products.length + sales.length + contacts.length + purchases.length + categories.length;
+      if (totalDocs > 0) {
+        ShopStorage.loadCustomData({
+          products,
+          sales,
+          contacts,
+          purchases,
+          payments,
+          expenses,
+          estimates,
+          professionals,
+          categories,
+        });
+      } else {
+        // Genuinely empty cloud account
+        ShopStorage.init();
+      }
+
+      // Fetch user profile & settings
+      try {
+        const userDocRef = doc(db, 'users', uid);
+        const userSnap = await getDoc(userDocRef);
+        if (userSnap.exists()) {
+          const data = userSnap.data();
+          if (data?.shopName && this.currentUser) {
+            this.currentUser.shopName = data.shopName;
+            localStorage.setItem(`ak_${uid}_shop_name`, data.shopName);
+          }
+        }
+
+        const settingsSnap = await getDoc(doc(db, 'users', uid, 'settings', 'general'));
+        if (settingsSnap.exists()) {
+          const s = settingsSnap.data();
+          if (s.shopName) localStorage.setItem(`ak_${uid}_shop_name`, s.shopName);
+          if (s.shopAddress !== undefined) localStorage.setItem(`ak_${uid}_shop_address`, s.shopAddress);
+          if (s.shopPhone !== undefined) localStorage.setItem(`ak_${uid}_shop_phone`, s.shopPhone);
+          if (s.shopUpiId !== undefined) localStorage.setItem(`ak_${uid}_shop_upi_id`, s.shopUpiId);
+          if (s.shopGstin !== undefined) localStorage.setItem(`ak_${uid}_shop_gstin`, s.shopGstin);
+          if (s.shopState !== undefined) localStorage.setItem(`ak_${uid}_shop_state`, s.shopState);
+          if (s.shopStateCode !== undefined) localStorage.setItem(`ak_${uid}_shop_state_code`, s.shopStateCode);
+          if (s.invoicePrefix !== undefined) localStorage.setItem(`ak_${uid}_invoice_prefix`, s.invoicePrefix);
+        }
+      } catch (err) {
+        console.warn('Settings hydration error:', err);
+      }
+
+      this.initialHydrationComplete = true;
+      this.triggerDataUpdate();
+      this.recordSyncTime();
+      this.notify('synced');
+    } catch (err: any) {
+      console.error('Initial hydration failed:', err);
+      this.notify('error', 'Cloud sync connection error: ' + (err?.message || 'Check network'));
+    }
+  }
+
+  // --- Granular Local Mutation Handler ---
+  private async handleLocalMutation(uid: string, action: 'upsert' | 'delete', col: string, id: string, data?: any): Promise<void> {
+    if (!this.isOnline || !this.isLoggedIn()) return;
+
+    this.pendingWritesCount++;
+    try {
+      const docRef = doc(db, 'users', uid, col, id);
+      if (action === 'delete') {
+        await deleteDoc(docRef);
+      } else if (data) {
+        await setDoc(docRef, data, { merge: true });
+      }
+      this.recordSyncTime();
+      this.notify('synced');
+    } catch (err: any) {
+      console.warn(`Firestore mutation error on ${col}/${id}:`, err);
+      this.notify('error', `Write failed: ${err?.message || 'Will retry when connection stabilizes'}`);
+    } finally {
+      this.pendingWritesCount = Math.max(0, this.pendingWritesCount - 1);
+    }
+  }
+
+  // --- Real-time Snapshot Change Listeners ---
+  private attachLiveListeners(uid: string) {
+    this.detachLiveListeners();
+
+    const collections = [
+      'products', 'sales', 'contacts', 'purchases', 
+      'payments', 'expenses', 'estimates', 'professionals', 'categories'
+    ];
+
+    collections.forEach((colName) => {
+      const unsub = onSnapshot(collection(db, 'users', uid, colName), (snapshot) => {
+        // Skip first empty snapshot during initial hydration
+        if (!this.initialHydrationComplete) return;
+
+        let hasChanges = false;
+        snapshot.docChanges().forEach((change) => {
+          hasChanges = true;
+          const docId = change.doc.id;
+          const docData = change.doc.data();
+
+          if (change.type === 'removed') {
+            // Document was deleted on another device or via sample cleanup
+            this.applyLocalDeletion(colName, docId);
+          } else if (change.type === 'added' || change.type === 'modified') {
+            this.applyLocalUpsert(colName, docData);
+          }
+        });
+
+        if (hasChanges) {
+          this.triggerDataUpdate();
+          this.recordSyncTime();
+          this.notify('synced');
+        }
+      }, (err) => {
+        console.warn(`Snapshot listener error on ${colName}:`, err);
+        handleFirestoreError(err, OperationType.LIST, `users/${uid}/${colName}`);
+      });
+
+      this.unsubscribes.push(unsub);
+    });
+
+    // Settings listener
+    const unsubSettings = onSnapshot(collection(db, 'users', uid, 'settings'), (snapshot) => {
+      snapshot.forEach(d => {
+        const data = d.data();
+        if (data.shopName) localStorage.setItem(`ak_${uid}_shop_name`, data.shopName);
+        if (data.shopAddress !== undefined) localStorage.setItem(`ak_${uid}_shop_address`, data.shopAddress);
+        if (data.shopPhone !== undefined) localStorage.setItem(`ak_${uid}_shop_phone`, data.shopPhone);
+        if (data.shopUpiId !== undefined) localStorage.setItem(`ak_${uid}_shop_upi_id`, data.shopUpiId);
+        if (data.shopGstin !== undefined) localStorage.setItem(`ak_${uid}_shop_gstin`, data.shopGstin);
+        if (data.shopState !== undefined) localStorage.setItem(`ak_${uid}_shop_state`, data.shopState);
+        if (data.shopStateCode !== undefined) localStorage.setItem(`ak_${uid}_shop_state_code`, data.shopStateCode);
+        if (data.invoicePrefix !== undefined) localStorage.setItem(`ak_${uid}_invoice_prefix`, data.invoicePrefix);
+      });
+      this.triggerDataUpdate();
+    });
+    this.unsubscribes.push(unsubSettings);
+  }
+
+  private applyLocalDeletion(colName: string, docId: string): void {
+    // Delete silently in local storage without triggering recursive mutation callback
+    const listener = this.currentMutationHandler;
+    ShopStorage.registerMutationListener(null);
+    try {
+      if (colName === 'products') ShopStorage.deleteProduct(docId);
+      else if (colName === 'contacts') ShopStorage.deleteContact(docId);
+      else if (colName === 'expenses') ShopStorage.deleteExpense(docId);
+      else if (colName === 'estimates') ShopStorage.deleteEstimate(docId);
+      else if (colName === 'professionals') ShopStorage.deleteProfessional(docId);
+    } finally {
+      ShopStorage.registerMutationListener(listener);
+    }
+  }
+
+  private applyLocalUpsert(colName: string, docData: any): void {
+    const listener = this.currentMutationHandler;
+    ShopStorage.registerMutationListener(null);
+    try {
+      if (colName === 'products') ShopStorage.saveProduct(docData as Product);
+      else if (colName === 'contacts') ShopStorage.saveContact(docData as Contact);
+      else if (colName === 'professionals') ShopStorage.saveProfessional(docData as Professional);
+      else if (colName === 'categories') ShopStorage.saveCategory(docData as Category);
+      else if (colName === 'estimates') ShopStorage.saveEstimate(docData as MaterialEstimate);
+    } finally {
+      ShopStorage.registerMutationListener(listener);
+    }
+  }
+
+  private detachLiveListeners() {
+    this.unsubscribes.forEach(unsub => unsub());
+    this.unsubscribes = [];
+  }
+
+  private triggerDataUpdate() {
+    if (this.onDataUpdatedCallback) {
+      try {
+        this.onDataUpdatedCallback();
+      } catch {}
+    }
+  }
+
+  // --- 1. Robust Authentication & Error Handling ---
   public async register(params: {
     email: string;
     password: string;
@@ -157,14 +432,10 @@ class CloudSyncService {
   }): Promise<{ success: boolean; user?: UserProfile; error?: string }> {
     const cleanEmail = params.email.trim();
     if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      const err = 'Please enter a valid email address.';
-      this.notify('error', err);
-      return { success: false, error: err };
+      return { success: false, error: 'Please enter a valid email address.' };
     }
     if (!params.password || params.password.length < 6) {
-      const err = 'Password must be at least 6 characters long.';
-      this.notify('error', err);
-      return { success: false, error: err };
+      return { success: false, error: 'Password must be at least 6 characters long.' };
     }
 
     this.notify('syncing');
@@ -178,17 +449,17 @@ class CloudSyncService {
       let msg = 'Registration failed. Please check credentials.';
 
       if (code === 'auth/operation-not-allowed') {
-        msg = 'Email/Password registration is not yet enabled in Firebase Project Console. Please enable "Email/Password" in Firebase Console (Authentication > Sign-in method), or use 1-Tap Google Sign-In below.';
+        msg = 'Email/Password sign-in is disabled in your Firebase Console. Please enable "Email/Password" in Firebase Console (Authentication > Sign-in method), or sign in with 1-Tap Google Sign-In.';
       } else if (code === 'auth/email-already-in-use') {
-        msg = 'This email is already registered. Please switch to the "Sign In" tab above to log in.';
+        msg = 'This email is already registered. Please switch to the "Sign In" tab to log in.';
       } else if (code === 'auth/invalid-email') {
-        msg = 'The email address format is invalid. Please check for typos.';
+        msg = 'The email address format is invalid.';
       } else if (code === 'auth/weak-password') {
         msg = 'Password is too weak. Please use at least 6 characters.';
       } else if (code === 'auth/network-request-failed') {
-        msg = 'Network error. Please check your internet connection.';
+        msg = 'Network connection error. Please verify your internet connection.';
       } else if (code === 'auth/too-many-requests') {
-        msg = 'Too many attempts. Please wait a minute and try again.';
+        msg = 'Too many attempts. Please wait a minute and retry.';
       } else if (authErr?.message) {
         msg = authErr.message.replace(/^Firebase:\s*/, '');
       }
@@ -197,7 +468,7 @@ class CloudSyncService {
       return { success: false, error: msg };
     }
 
-    const effectiveShopName = params.shopName?.trim() || localStorage.getItem('ak_shop_name') || 'Hardware & Paints Store';
+    const effectiveShopName = params.shopName?.trim() || 'A.K. Hardware Store';
     const userProfile: UserProfile = {
       id: cred.user.uid,
       email: cleanEmail,
@@ -207,8 +478,7 @@ class CloudSyncService {
 
     try {
       // Save user record in Firestore under users/{uid}
-      const userDocRef = doc(db, 'users', cred.user.uid);
-      await setDoc(userDocRef, {
+      await setDoc(doc(db, 'users', cred.user.uid), {
         uid: cred.user.uid,
         email: cleanEmail,
         name: userProfile.name,
@@ -216,25 +486,22 @@ class CloudSyncService {
         createdAt: new Date().toISOString(),
       }, { merge: true });
 
-      // Save general settings in Firestore
+      // Save initial settings in Firestore
       await setDoc(doc(db, 'users', cred.user.uid, 'settings', 'general'), {
         shopName: effectiveShopName,
-        shopAddress: localStorage.getItem('ak_shop_address') || '',
-        shopPhone: localStorage.getItem('ak_shop_phone') || '',
-        shopUpiId: localStorage.getItem('ak_shop_upi_id') || '',
-        voiceLanguage: localStorage.getItem('ak_voice_language') || 'en',
+        shopAddress: '',
+        shopPhone: '',
+        shopUpiId: '',
+        voiceLanguage: 'en',
+        updatedAt: new Date().toISOString(),
       }, { merge: true });
-
-      // Initial push of existing local shop data so cloud gets immediate copy
-      await this.pushToCloud(cred.user.uid);
     } catch (firestoreErr) {
       console.warn('Initial Firestore setup deferred:', firestoreErr);
     }
 
     this.currentUser = userProfile;
-    localStorage.setItem('ak_auth_user_v1', JSON.stringify(userProfile));
-    localStorage.setItem('ak_auth_token_v1', cred.user.uid);
-    localStorage.setItem('ak_shop_name', effectiveShopName);
+    ShopStorage.setActiveNamespace(cred.user.uid);
+    localStorage.setItem(`ak_${cred.user.uid}_shop_name`, effectiveShopName);
 
     this.attachLiveListeners(cred.user.uid);
     this.recordSyncTime();
@@ -247,22 +514,13 @@ class CloudSyncService {
     password: string;
   }): Promise<{ success: boolean; user?: UserProfile; error?: string }> {
     const cleanEmail = params.email.trim();
-    if (!cleanEmail) {
-      const err = 'Email address is required.';
-      this.notify('error', err);
-      return { success: false, error: err };
-    }
-    if (!params.password) {
-      const err = 'Password is required.';
-      this.notify('error', err);
-      return { success: false, error: err };
-    }
+    if (!cleanEmail) return { success: false, error: 'Email address is required.' };
+    if (!params.password) return { success: false, error: 'Password is required.' };
 
     try {
       this.notify('syncing');
       const cred = await signInWithEmailAndPassword(auth, cleanEmail, params.password);
-      
-      // Pull user profile doc
+
       let userData: any = null;
       try {
         const userDocRef = doc(db, 'users', cred.user.uid);
@@ -276,18 +534,18 @@ class CloudSyncService {
         id: cred.user.uid,
         email: cleanEmail,
         name: userData?.name || 'Shop Owner',
-        shopName: userData?.shopName || localStorage.getItem('ak_shop_name') || 'Hardware & Paints Store',
+        shopName: userData?.shopName || 'A.K. Hardware Store',
       };
 
       this.currentUser = userProfile;
-      localStorage.setItem('ak_auth_user_v1', JSON.stringify(userProfile));
-      localStorage.setItem('ak_auth_token_v1', cred.user.uid);
+      ShopStorage.setActiveNamespace(cred.user.uid);
+
       if (userData?.shopName) {
-        localStorage.setItem('ak_shop_name', userData.shopName);
+        localStorage.setItem(`ak_${cred.user.uid}_shop_name`, userData.shopName);
       }
 
+      await this.hydrateFromCloud(cred.user.uid);
       this.attachLiveListeners(cred.user.uid);
-
       this.recordSyncTime();
       this.notify('synced');
       return { success: true, user: userProfile };
@@ -299,13 +557,13 @@ class CloudSyncService {
       if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
         msg = 'Invalid email or password. Please verify your credentials or register a new account.';
       } else if (code === 'auth/operation-not-allowed') {
-        msg = 'Email/Password sign-in is not enabled in Firebase Console. Please enable "Email/Password" in Firebase Console (Authentication > Sign-in method), or sign in with Google below.';
+        msg = 'Email/Password sign-in is disabled in Firebase Console. Please enable "Email/Password" in Firebase Console (Authentication > Sign-in method), or sign in with Google.';
       } else if (code === 'auth/invalid-email') {
         msg = 'The email address format is invalid.';
       } else if (code === 'auth/network-request-failed') {
         msg = 'Network connection issue. Please check your internet connection.';
       } else if (code === 'auth/too-many-requests') {
-        msg = 'Too many failed login attempts. Please wait a few moments and retry.';
+        msg = 'Too many failed attempts. Please wait a moment and retry.';
       } else if (err?.message) {
         msg = err.message.replace(/^Firebase:\s*/, '');
       }
@@ -322,7 +580,7 @@ class CloudSyncService {
       provider.setCustomParameters({ prompt: 'select_account' });
       const cred = await signInWithPopup(auth, provider);
 
-      const effectiveShopName = localStorage.getItem('ak_shop_name') || 'Hardware & Paints Store';
+      const effectiveShopName = 'A.K. Hardware Store';
       const userProfile: UserProfile = {
         id: cred.user.uid,
         email: cred.user.email || 'owner@akware.com',
@@ -347,16 +605,15 @@ class CloudSyncService {
           if (data?.name) userProfile.name = data.name;
         }
       } catch (e) {
-        console.warn('Failed to load/save user doc after Google login:', e);
+        console.warn('Failed to save Google profile:', e);
       }
 
       this.currentUser = userProfile;
-      localStorage.setItem('ak_auth_user_v1', JSON.stringify(userProfile));
-      localStorage.setItem('ak_auth_token_v1', cred.user.uid);
-      localStorage.setItem('ak_shop_name', userProfile.shopName);
+      ShopStorage.setActiveNamespace(cred.user.uid);
+      localStorage.setItem(`ak_${cred.user.uid}_shop_name`, userProfile.shopName);
 
+      await this.hydrateFromCloud(cred.user.uid);
       this.attachLiveListeners(cred.user.uid);
-
       this.recordSyncTime();
       this.notify('synced');
       return { success: true, user: userProfile };
@@ -367,11 +624,7 @@ class CloudSyncService {
       if (code === 'auth/popup-closed-by-user') {
         msg = 'Sign-in cancelled (popup was closed before completing).';
       } else if (code === 'auth/popup-blocked') {
-        msg = 'Sign-in popup was blocked by browser. Please enable popups for this site and retry.';
-      } else if (code === 'auth/cancelled-popup-request') {
-        msg = 'A previous sign-in attempt was in progress. Please retry.';
-      } else if (code === 'auth/operation-not-allowed') {
-        msg = 'Google Sign-In is not enabled in Firebase Console (Authentication > Sign-in method).';
+        msg = 'Popup was blocked by browser. Please enable popups for this site.';
       } else if (err?.message) {
         msg = err.message.replace(/^Firebase:\s*/, '');
       }
@@ -380,330 +633,121 @@ class CloudSyncService {
     }
   }
 
+  public async sendPasswordReset(email: string): Promise<{ success: boolean; error?: string }> {
+    const cleanEmail = email.trim();
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return { success: false, error: 'Please enter a valid email address.' };
+    }
+    try {
+      await sendPasswordResetEmail(auth, cleanEmail);
+      return { success: true };
+    } catch (err: any) {
+      console.error('Password reset error:', err);
+      const code = err?.code || '';
+      let msg = 'Failed to send password reset email.';
+      if (code === 'auth/user-not-found') {
+        msg = 'No registered shop account found with this email.';
+      } else if (code === 'auth/invalid-email') {
+        msg = 'Invalid email address format.';
+      } else if (code === 'auth/too-many-requests') {
+        msg = 'Too many requests. Please wait a moment before trying again.';
+      } else if (err?.message) {
+        msg = err.message.replace(/^Firebase:\s*/, '');
+      }
+      return { success: false, error: msg };
+    }
+  }
+
   public async logout(): Promise<void> {
     this.detachLiveListeners();
+    ShopStorage.registerMutationListener(null);
     try {
       await firebaseSignOut(auth);
     } catch {}
     this.currentUser = null;
-    try {
-      localStorage.removeItem('ak_auth_user_v1');
-      localStorage.removeItem('ak_auth_token_v1');
-    } catch {}
+    ShopStorage.setActiveNamespace(null);
+    this.authStatus = 'signedOut';
+    this.notifyAuthChange();
     this.notify('idle');
+    this.triggerDataUpdate();
   }
 
-  /**
-   * Conflict resolution: Keep newest edited record based on updatedAt or createdAt
-   */
-  private mergeByNewest<T extends { id: string; updatedAt?: string; createdAt?: string }>(
-    localList: T[],
-    cloudList: T[]
-  ): T[] {
-    const map = new Map<string, T>();
-    for (const item of localList) {
-      if (item && item.id) map.set(item.id, item);
-    }
-    for (const cloudItem of cloudList) {
-      if (!cloudItem || !cloudItem.id) continue;
-      const localItem = map.get(cloudItem.id);
-      if (!localItem) {
-        map.set(cloudItem.id, cloudItem);
-      } else {
-        const localTime = new Date(localItem.updatedAt || localItem.createdAt || 0).getTime();
-        const cloudTime = new Date(cloudItem.updatedAt || cloudItem.createdAt || 0).getTime();
-        if (cloudTime >= localTime) {
-          map.set(cloudItem.id, cloudItem);
-        }
-      }
-    }
-    return Array.from(map.values());
-  }
+  // --- Deletion of Sample Records in Cloud ---
+  public async clearCloudSampleData(sampleDocIds: { [col: string]: string[] }): Promise<{ success: boolean; error?: string }> {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return { success: true }; // Local only if not logged in
 
-  private mergeSalesByNewest(localSales: Sale[], cloudSales: Sale[]): Sale[] {
-    const map = new Map<string, Sale>();
-    for (const s of localSales) {
-      if (s && s.id) map.set(s.id, s);
-    }
-    for (const s of cloudSales) {
-      if (!s || !s.id) continue;
-      const local = map.get(s.id);
-      if (!local) {
-        map.set(s.id, s);
-      } else {
-        const localTime = new Date(local.createdAt || local.date || 0).getTime();
-        const cloudTime = new Date(s.createdAt || s.date || 0).getTime();
-        if (cloudTime >= localTime) {
-          map.set(s.id, s);
-        }
-      }
-    }
-    return Array.from(map.values());
-  }
-
-  // --- 2. MULTI-DEVICE LIVE DATA SYNCHRONIZATION ---
-  private attachLiveListeners(uid: string) {
-    this.detachLiveListeners();
-
-    // 1. Products Listener (Instant live sync across screens)
-    const unsubProducts = onSnapshot(collection(db, 'users', uid, 'products'), (snapshot) => {
-      const cloudProducts: Product[] = [];
-      snapshot.forEach((d) => cloudProducts.push(d.data() as Product));
-      if (cloudProducts.length > 0) {
-        const local = ShopStorage.getProducts();
-        const resolved = this.mergeByNewest(local, cloudProducts);
-        ShopStorage.loadCustomData({ products: resolved });
-        this.triggerDataUpdate();
-      }
-      this.recordSyncTime();
-      this.notify('synced');
-    }, (err) => {
-      console.warn('Products sync listener error:', err);
-    });
-    this.unsubscribes.push(unsubProducts);
-
-    // 2. Sales Listener
-    const unsubSales = onSnapshot(collection(db, 'users', uid, 'sales'), (snapshot) => {
-      const cloudSales: Sale[] = [];
-      snapshot.forEach((d) => cloudSales.push(d.data() as Sale));
-      if (cloudSales.length > 0) {
-        const local = ShopStorage.getSales();
-        const resolved = this.mergeSalesByNewest(local, cloudSales);
-        ShopStorage.loadCustomData({ sales: resolved });
-        this.triggerDataUpdate();
-      }
-      this.recordSyncTime();
-      this.notify('synced');
-    }, (err) => {
-      console.warn('Sales sync listener error:', err);
-    });
-    this.unsubscribes.push(unsubSales);
-
-    // 3. Contacts / Khata Listener
-    const unsubContacts = onSnapshot(collection(db, 'users', uid, 'contacts'), (snapshot) => {
-      const cloudContacts: Contact[] = [];
-      snapshot.forEach((d) => cloudContacts.push(d.data() as Contact));
-      if (cloudContacts.length > 0) {
-        const local = ShopStorage.getContacts();
-        const resolved = this.mergeByNewest(local, cloudContacts);
-        ShopStorage.loadCustomData({ contacts: resolved });
-        this.triggerDataUpdate();
-      }
-      this.recordSyncTime();
-      this.notify('synced');
-    }, (err) => {
-      console.warn('Contacts sync listener error:', err);
-    });
-    this.unsubscribes.push(unsubContacts);
-
-    // 4. Professionals Listener
-    const unsubProfs = onSnapshot(collection(db, 'users', uid, 'professionals'), (snapshot) => {
-      const cloudProfs: Professional[] = [];
-      snapshot.forEach((d) => cloudProfs.push(d.data() as Professional));
-      if (cloudProfs.length > 0) {
-        const local = ShopStorage.getProfessionals();
-        const resolved = this.mergeByNewest(local, cloudProfs);
-        ShopStorage.loadCustomData({ professionals: resolved });
-        this.triggerDataUpdate();
-      }
-      this.recordSyncTime();
-      this.notify('synced');
-    }, (err) => {
-      console.warn('Professionals sync listener error:', err);
-    });
-    this.unsubscribes.push(unsubProfs);
-
-    // 5. Purchases Listener
-    const unsubPurchases = onSnapshot(collection(db, 'users', uid, 'purchases'), (snapshot) => {
-      const cloudPurchases: Purchase[] = [];
-      snapshot.forEach((d) => cloudPurchases.push(d.data() as Purchase));
-      if (cloudPurchases.length > 0) {
-        const local = ShopStorage.getPurchases();
-        const resolved = this.mergeByNewest(local, cloudPurchases);
-        ShopStorage.loadCustomData({ purchases: resolved });
-        this.triggerDataUpdate();
-      }
-      this.recordSyncTime();
-      this.notify('synced');
-    }, (err) => {
-      console.warn('Purchases sync listener error:', err);
-    });
-    this.unsubscribes.push(unsubPurchases);
-
-    // 6. Payments Listener
-    const unsubPayments = onSnapshot(collection(db, 'users', uid, 'payments'), (snapshot) => {
-      const cloudPayments: Payment[] = [];
-      snapshot.forEach((d) => cloudPayments.push(d.data() as Payment));
-      if (cloudPayments.length > 0) {
-        const local = ShopStorage.getPayments();
-        const resolved = this.mergeByNewest(local, cloudPayments);
-        ShopStorage.loadCustomData({ payments: resolved });
-        this.triggerDataUpdate();
-      }
-      this.recordSyncTime();
-      this.notify('synced');
-    }, (err) => {
-      console.warn('Payments sync listener error:', err);
-    });
-    this.unsubscribes.push(unsubPayments);
-
-    // 7. Expenses Listener
-    const unsubExpenses = onSnapshot(collection(db, 'users', uid, 'expenses'), (snapshot) => {
-      const cloudExpenses: Expense[] = [];
-      snapshot.forEach((d) => cloudExpenses.push(d.data() as Expense));
-      if (cloudExpenses.length > 0) {
-        const local = ShopStorage.getExpenses();
-        const resolved = this.mergeByNewest(local, cloudExpenses);
-        ShopStorage.loadCustomData({ expenses: resolved });
-        this.triggerDataUpdate();
-      }
-      this.recordSyncTime();
-      this.notify('synced');
-    }, (err) => {
-      console.warn('Expenses sync listener error:', err);
-    });
-    this.unsubscribes.push(unsubExpenses);
-
-    // 8. Categories Listener
-    const unsubCategories = onSnapshot(collection(db, 'users', uid, 'categories'), (snapshot) => {
-      const cloudCats: Category[] = [];
-      snapshot.forEach((d) => cloudCats.push(d.data() as Category));
-      if (cloudCats.length > 0) {
-        const local = ShopStorage.getCategories();
-        const resolved = this.mergeByNewest(local, cloudCats);
-        ShopStorage.loadCustomData({ categories: resolved });
-        this.triggerDataUpdate();
-      }
-      this.recordSyncTime();
-      this.notify('synced');
-    }, (err) => {
-      console.warn('Categories sync listener error:', err);
-    });
-    this.unsubscribes.push(unsubCategories);
-
-    // 9. Settings Listener
-    const unsubSettings = onSnapshot(collection(db, 'users', uid, 'settings'), (snapshot) => {
-      snapshot.forEach((d) => {
-        const data = d.data();
-        if (data.shopName) localStorage.setItem('ak_shop_name', data.shopName);
-        if (data.shopAddress) localStorage.setItem('ak_shop_address', data.shopAddress);
-        if (data.shopPhone) localStorage.setItem('ak_shop_phone', data.shopPhone);
-        if (data.shopUpiId) localStorage.setItem('ak_shop_upi_id', data.shopUpiId);
-        if (data.voiceLanguage) localStorage.setItem('ak_voice_language', data.voiceLanguage);
-        if (data.shopGstin) localStorage.setItem('ak_shop_gstin', data.shopGstin);
-        if (data.shopState) localStorage.setItem('ak_shop_state', data.shopState);
-        if (data.shopStateCode) localStorage.setItem('ak_shop_state_code', data.shopStateCode);
-        if (data.invoicePrefix) localStorage.setItem('ak_invoice_prefix', data.invoicePrefix);
-      });
-      this.triggerDataUpdate();
-      this.recordSyncTime();
-      this.notify('synced');
-    }, (err) => {
-      console.warn('Settings sync listener error:', err);
-    });
-    this.unsubscribes.push(unsubSettings);
-  }
-
-  private detachLiveListeners() {
-    this.unsubscribes.forEach((unsub) => unsub());
-    this.unsubscribes = [];
-  }
-
-  private triggerDataUpdate() {
-    if (this.onDataUpdatedCallback) {
-      try {
-        this.onDataUpdatedCallback();
-      } catch {}
-    }
-  }
-
-  private recordSyncTime() {
     try {
-      const now = new Date().toISOString();
-      localStorage.setItem('ak_last_sync_v1', now);
-    } catch {}
+      this.notify('syncing');
+      for (const [colName, ids] of Object.entries(sampleDocIds)) {
+        for (const docId of ids) {
+          try {
+            await deleteDoc(doc(db, 'users', uid, colName, docId));
+          } catch (e) {
+            console.warn(`Failed to delete sample doc ${colName}/${docId}:`, e);
+          }
+        }
+      }
+      this.recordSyncTime();
+      this.notify('synced');
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to clear sample records from cloud.' };
+    }
   }
 
-  // Push local database to Firestore
+  // --- Full Push to Cloud (Manual backup or bulk save) ---
   public async pushToCloud(customUid?: string): Promise<{ success: boolean; error?: string }> {
     const uid = customUid || (auth.currentUser ? auth.currentUser.uid : null);
-    if (!uid) return { success: false, error: 'Not logged in' };
-
-    if (!navigator.onLine) {
-      this.notify('offline', 'Device is offline. Changes saved locally.');
-      return { success: false, error: 'Device is offline' };
-    }
+    if (!uid) return { success: false, error: 'Not signed in' };
 
     try {
       this.notify('syncing');
 
-      // 1. Push Products
       const products = ShopStorage.getProducts();
       for (const p of products) {
-        await setDoc(doc(db, 'users', uid, 'products', p.id), p);
+        await setDoc(doc(db, 'users', uid, 'products', p.id), p, { merge: true });
       }
 
-      // 2. Push Sales
       const sales = ShopStorage.getSales();
       for (const s of sales) {
-        await setDoc(doc(db, 'users', uid, 'sales', s.id), s);
+        await setDoc(doc(db, 'users', uid, 'sales', s.id), s, { merge: true });
       }
 
-      // 3. Push Contacts
       const contacts = ShopStorage.getContacts();
       for (const c of contacts) {
-        await setDoc(doc(db, 'users', uid, 'contacts', c.id), c);
+        await setDoc(doc(db, 'users', uid, 'contacts', c.id), c, { merge: true });
       }
 
-      // 4. Push Professionals
-      const profs = ShopStorage.getProfessionals();
-      for (const pr of profs) {
-        await setDoc(doc(db, 'users', uid, 'professionals', pr.id), pr);
-      }
-
-      // 5. Push Purchases
       const purchases = ShopStorage.getPurchases();
       for (const pu of purchases) {
-        await setDoc(doc(db, 'users', uid, 'purchases', pu.id), pu);
+        await setDoc(doc(db, 'users', uid, 'purchases', pu.id), pu, { merge: true });
       }
 
-      // 6. Push Payments
       const payments = ShopStorage.getPayments();
       for (const py of payments) {
-        await setDoc(doc(db, 'users', uid, 'payments', py.id), py);
+        await setDoc(doc(db, 'users', uid, 'payments', py.id), py, { merge: true });
       }
 
-      // 7. Push Expenses
       const expenses = ShopStorage.getExpenses();
       for (const ex of expenses) {
-        await setDoc(doc(db, 'users', uid, 'expenses', ex.id), ex);
+        await setDoc(doc(db, 'users', uid, 'expenses', ex.id), ex, { merge: true });
       }
 
-      // 8. Push Categories
       const categories = ShopStorage.getCategories();
       for (const cat of categories) {
-        await setDoc(doc(db, 'users', uid, 'categories', cat.id), cat);
+        await setDoc(doc(db, 'users', uid, 'categories', cat.id), cat, { merge: true });
       }
 
-      // 9. Push Estimates
       const estimates = ShopStorage.getEstimates();
       for (const est of estimates) {
-        await setDoc(doc(db, 'users', uid, 'estimates', est.id), est);
+        await setDoc(doc(db, 'users', uid, 'estimates', est.id), est, { merge: true });
       }
 
-      // 10. Push Settings
-      await setDoc(doc(db, 'users', uid, 'settings', 'general'), {
-        shopName: localStorage.getItem('ak_shop_name') || 'A.K. Hardware',
-        shopAddress: localStorage.getItem('ak_shop_address') || '',
-        shopPhone: localStorage.getItem('ak_shop_phone') || '',
-        shopUpiId: localStorage.getItem('ak_shop_upi_id') || '',
-        voiceLanguage: localStorage.getItem('ak_voice_language') || 'en',
-        shopGstin: localStorage.getItem('ak_shop_gstin') || '',
-        shopState: localStorage.getItem('ak_shop_state') || 'Madhya Pradesh',
-        shopStateCode: localStorage.getItem('ak_shop_state_code') || '23',
-        invoicePrefix: localStorage.getItem('ak_invoice_prefix') || 'AK/',
-        updatedAt: new Date().toISOString(),
-      }, { merge: true });
+      const profs = ShopStorage.getProfessionals();
+      for (const pr of profs) {
+        await setDoc(doc(db, 'users', uid, 'professionals', pr.id), pr, { merge: true });
+      }
 
       this.recordSyncTime();
       this.notify('synced');
@@ -715,103 +759,55 @@ class CloudSyncService {
     }
   }
 
-  // Manual Trigger or Pull
   public async syncNow(): Promise<{ success: boolean; error?: string }> {
-    if (!this.isLoggedIn()) {
-      return { success: false, error: 'Not signed in' };
-    }
+    if (!this.isLoggedIn()) return { success: false, error: 'Not signed in' };
     return this.pushToCloud();
   }
 
-  // --- 3. REFINED CLOUD BACKUP SNAPSHOTS ---
-  public async saveCloudBackupSnapshot(label?: string): Promise<{ success: boolean; id?: string; error?: string }> {
-    const uid = auth.currentUser?.uid;
-    if (!uid) return { success: false, error: 'Please sign in to your Firebase account to save cloud backups.' };
+  // --- Diagnostics & Health Inspection ---
+  public getDiagnostics(): SyncDiagnosticInfo {
+    const rawUid = this.currentUser?.id || null;
+    const rawEmail = this.currentUser?.email || null;
 
-    try {
-      this.notify('syncing');
-      const backupJson = ShopStorage.exportBackupJSON();
-      const parsed = JSON.parse(backupJson);
-      const backupId = `backup_${Date.now()}`;
-      
-      const snapshotDocRef = doc(db, 'users', uid, 'backups', backupId);
-      await setDoc(snapshotDocRef, {
-        id: backupId,
-        label: label || `Cloud Backup - ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}`,
-        createdAt: new Date().toISOString(),
-        shopName: parsed.shopName,
-        stats: parsed.stats || {},
-        payloadJson: backupJson,
-      });
+    const maskString = (str: string | null, visibleStart = 3, visibleEnd = 3): string | null => {
+      if (!str) return null;
+      if (str.length <= visibleStart + visibleEnd) return '***';
+      return `${str.slice(0, visibleStart)}...${str.slice(-visibleEnd)}`;
+    };
 
-      this.recordSyncTime();
-      this.notify('synced');
-      return { success: true, id: backupId };
-    } catch (err: any) {
-      const msg = err?.message || 'Failed to save cloud backup snapshot.';
-      this.notify('error', msg);
-      return { success: false, error: msg };
-    }
-  }
+    const maskEmail = (email: string | null): string | null => {
+      if (!email) return null;
+      const [user, domain] = email.split('@');
+      if (!domain) return maskString(email);
+      return `${user.slice(0, 1)}***@${domain}`;
+    };
 
-  public async listCloudBackupSnapshots(): Promise<Array<{
-    id: string;
-    label: string;
-    createdAt: string;
-    shopName: string;
-    stats: any;
-  }>> {
-    const uid = auth.currentUser?.uid;
-    if (!uid) return [];
+    const sampleCounts = ShopStorage.getSampleCounts();
 
-    try {
-      const q = query(collection(db, 'users', uid, 'backups'), orderBy('createdAt', 'desc'), limit(15));
-      const snaps = await getDocs(q);
-      const result: any[] = [];
-      snaps.forEach(d => {
-        const data = d.data();
-        result.push({
-          id: d.id,
-          label: data.label || 'Snapshot',
-          createdAt: data.createdAt,
-          shopName: data.shopName || '',
-          stats: data.stats || {},
-        });
-      });
-      return result;
-    } catch (err) {
-      console.warn('Error fetching cloud backup snapshots:', err);
-      return [];
-    }
-  }
-
-  public async restoreFromCloudSnapshot(backupId: string, mode: 'merge' | 'replace' = 'replace'): Promise<{ success: boolean; error?: string }> {
-    const uid = auth.currentUser?.uid;
-    if (!uid) return { success: false, error: 'Not signed in.' };
-
-    try {
-      this.notify('syncing');
-      const snapDoc = await getDoc(doc(db, 'users', uid, 'backups', backupId));
-      if (!snapDoc.exists()) {
-        return { success: false, error: 'Backup snapshot not found in cloud.' };
-      }
-      const data = snapDoc.data();
-      if (!data.payloadJson) {
-        return { success: false, error: 'Snapshot data is empty.' };
-      }
-
-      const res = ShopStorage.importBackupJSON(data.payloadJson, mode);
-      if (res.success) {
-        this.triggerDataUpdate();
-        await this.pushToCloud(uid);
-        this.notify('synced');
-        return { success: true };
-      } else {
-        return { success: false, error: res.error };
-      }
-    } catch (err: any) {
-      return { success: false, error: err?.message || 'Failed to restore snapshot.' };
-    }
+    return {
+      authStatus: this.authStatus,
+      userIdMasked: maskString(rawUid, 4, 4),
+      userEmailMasked: maskEmail(rawEmail),
+      syncStatus: this.currentStatus,
+      isOnline: this.isOnline,
+      initialHydrationComplete: this.initialHydrationComplete,
+      lastSuccessfulSync: this.getLastSyncTime(),
+      pendingWritesCount: this.pendingWritesCount,
+      collectionCounts: {
+        products: ShopStorage.getProducts().length,
+        sales: ShopStorage.getSales().length,
+        contacts: ShopStorage.getContacts().length,
+        professionals: ShopStorage.getProfessionals().length,
+        purchases: ShopStorage.getPurchases().length,
+        payments: ShopStorage.getPayments().length,
+        expenses: ShopStorage.getExpenses().length,
+        estimates: ShopStorage.getEstimates().length,
+      },
+      sampleRecordsCount: sampleCounts.total,
+      lastError: this.currentError,
+      appVersion: '3.0-Production',
+      schemaVersion: 2,
+    };
   }
 }
 

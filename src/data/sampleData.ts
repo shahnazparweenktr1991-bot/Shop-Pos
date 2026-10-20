@@ -12,7 +12,8 @@ export const SAMPLE_CATEGORIES: Category[] = [
       { id: 'sub-enamel', name: 'Enamel & Gloss' },
       { id: 'sub-distemper', name: 'Distemper' }
     ],
-    isSample: true, 
+    isSample: true,
+    recordOrigin: 'sample', 
     createdAt: '2026-10-01T08:00:00Z' 
   },
   { 
@@ -25,7 +26,8 @@ export const SAMPLE_CATEGORIES: Category[] = [
       { id: 'sub-metal-primer', name: 'Red Oxide / Metal' },
       { id: 'sub-wood-primer', name: 'Wood Primer' }
     ],
-    isSample: true, 
+    isSample: true,
+    recordOrigin: 'sample', 
     createdAt: '2026-10-01T08:00:00Z' 
   },
   { 
@@ -37,7 +39,8 @@ export const SAMPLE_CATEGORIES: Category[] = [
       { id: 'sub-white-putty', name: 'White Cement Putty' },
       { id: 'sub-acrylic-putty', name: 'Acrylic Wall Putty' }
     ],
-    isSample: true, 
+    isSample: true,
+    recordOrigin: 'sample', 
     createdAt: '2026-10-01T08:00:00Z' 
   },
   { 
@@ -48,7 +51,8 @@ export const SAMPLE_CATEGORIES: Category[] = [
       { id: 'sub-sakarni-pop', name: 'Standard Grade POP' },
       { id: 'sub-casting-pop', name: 'Ceiling & Moulding' }
     ],
-    isSample: true, 
+    isSample: true,
+    recordOrigin: 'sample', 
     createdAt: '2026-10-01T08:00:00Z' 
   },
   { 
@@ -61,7 +65,8 @@ export const SAMPLE_CATEGORIES: Category[] = [
       { id: 'sub-silicone', name: 'Silicone & Sealant' },
       { id: 'sub-instant', name: 'Instant Glue / Araldite' }
     ],
-    isSample: true, 
+    isSample: true,
+    recordOrigin: 'sample', 
     createdAt: '2026-10-01T08:00:00Z' 
   },
   { 
@@ -74,7 +79,8 @@ export const SAMPLE_CATEGORIES: Category[] = [
       { id: 'sub-fittings', name: 'Elbows, Tees & Couplers' },
       { id: 'sub-valves', name: 'Taps & Valves' }
     ],
-    isSample: true, 
+    isSample: true,
+    recordOrigin: 'sample', 
     createdAt: '2026-10-01T08:00:00Z' 
   },
   { 
@@ -86,7 +92,8 @@ export const SAMPLE_CATEGORIES: Category[] = [
       { id: 'sub-switches', name: 'Modular Switches' },
       { id: 'sub-tape', name: 'Insulation & PVC Tape' }
     ],
-    isSample: true, 
+    isSample: true,
+    recordOrigin: 'sample', 
     createdAt: '2026-10-01T08:00:00Z' 
   },
   { 
@@ -98,7 +105,8 @@ export const SAMPLE_CATEGORIES: Category[] = [
       { id: 'sub-hinges', name: 'Hinges & Handles' },
       { id: 'sub-tools', name: 'Tools & Blades' }
     ],
-    isSample: true, 
+    isSample: true,
+    recordOrigin: 'sample', 
     createdAt: '2026-10-01T08:00:00Z' 
   },
 ];
@@ -113,6 +121,7 @@ export const SAMPLE_CONTACTS: Contact[] = [
     creditBalance: 1450, // owes us ₹1450
     notes: 'Works on commercial & residential projects. Takes material on weekly credit.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-02T10:00:00Z'
   },
   {
@@ -124,6 +133,7 @@ export const SAMPLE_CONTACTS: Contact[] = [
     creditBalance: 8200, // owes us ₹8200
     notes: 'Large site orders, settles by bank transfer every 15 days.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-03T11:00:00Z'
   },
   {
@@ -135,6 +145,7 @@ export const SAMPLE_CONTACTS: Contact[] = [
     creditBalance: 0,
     notes: 'Cash on delivery buyer, regular PVC & valve purchases.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-04T09:00:00Z'
   },
   {
@@ -146,6 +157,7 @@ export const SAMPLE_CONTACTS: Contact[] = [
     creditBalance: 600,
     notes: 'Buys modular boxes and 2.5sqmm cables.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-05T14:00:00Z'
   },
   {
@@ -157,6 +169,7 @@ export const SAMPLE_CONTACTS: Contact[] = [
     creditBalance: -24500, // We owe them ₹24,500
     notes: 'Main paint & primer distributor. Payment due on 20th.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z'
   },
   {
@@ -168,6 +181,7 @@ export const SAMPLE_CONTACTS: Contact[] = [
     creditBalance: -8500, // We owe them ₹8,500
     notes: 'Fastener, pipe & adhesive supplier.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z'
   },
   {
@@ -179,6 +193,7 @@ export const SAMPLE_CONTACTS: Contact[] = [
     creditBalance: 0,
     notes: 'Renovating his independent bungalow.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-08T12:00:00Z'
   }
 ];
@@ -203,6 +218,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'Asian Paints Depot Wholesaler',
     notes: 'Bestseller interior economy paint. Fast turnaround.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   },
@@ -225,6 +241,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'Asian Paints Depot Wholesaler',
     notes: 'Interior paint touchups & small rooms.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   },
@@ -244,6 +261,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'Asian Paints Depot Wholesaler',
     notes: 'Exterior anti-fungal paint with 5-year warranty.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   },
@@ -263,6 +281,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'Asian Paints Depot Wholesaler',
     notes: 'Dilution 80-100% with water. Essential basecoat.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   },
@@ -282,6 +301,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'National Hardware Agencies',
     notes: 'High water resistance. 2-coat application.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   },
@@ -301,6 +321,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'National Hardware Agencies',
     notes: 'Smooth finish white cement based.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   },
@@ -320,6 +341,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'National Hardware Agencies',
     notes: 'For false ceilings and moulding work.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   },
@@ -339,6 +361,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'National Hardware Agencies',
     notes: 'Wood glue standard. High demand carpenter item.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   },
@@ -358,6 +381,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'National Hardware Agencies',
     notes: 'Concrete and plaster waterproofing additive.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   },
@@ -377,6 +401,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'National Hardware Agencies',
     notes: 'Plumbing drain & line pipe.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   },
@@ -396,6 +421,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'National Hardware Agencies',
     notes: 'Modular plate switch.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   },
@@ -415,6 +441,7 @@ export const SAMPLE_PRODUCTS: Product[] = [
     supplierName: 'National Hardware Agencies',
     notes: 'Gypsum board & false ceiling fixing screws.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z',
     updatedAt: '2026-10-10T11:00:00Z'
   }
@@ -469,6 +496,7 @@ export const SAMPLE_SALES: Sale[] = [
     notes: 'Site at Model Town. Remaining ₹1,450 to be paid on Saturday.',
     stockDeducted: true,
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-13T09:30:00Z'
   },
   {
@@ -488,6 +516,7 @@ export const SAMPLE_SALES: Sale[] = [
     notes: 'Small hardware, sandpaper and masking tape bundle.',
     stockDeducted: false, // Amount only does NOT touch stock
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-13T10:15:00Z'
   },
   {
@@ -538,6 +567,7 @@ export const SAMPLE_SALES: Sale[] = [
     notes: 'Full payment received in cash.',
     stockDeducted: true,
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-12T16:45:00Z'
   }
 ];
@@ -558,6 +588,7 @@ export const SAMPLE_PURCHASES: Purchase[] = [
     remainingBalance: 13500,
     notes: 'Festival restocking batch.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-10T11:00:00Z'
   },
   {
@@ -575,6 +606,7 @@ export const SAMPLE_PURCHASES: Purchase[] = [
     remainingBalance: 0,
     notes: 'Direct truck delivery paid via NEFT.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-11T14:30:00Z'
   }
 ];
@@ -590,6 +622,7 @@ export const SAMPLE_PAYMENTS: Payment[] = [
     paymentMethod: 'upi',
     notes: 'Part payment received for Sector 4 project.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-12T17:00:00Z'
   },
   {
@@ -602,6 +635,7 @@ export const SAMPLE_PAYMENTS: Payment[] = [
     paymentMethod: 'bank_transfer',
     notes: 'Advance cheque cleared.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-11T15:00:00Z'
   }
 ];
@@ -614,6 +648,7 @@ export const SAMPLE_EXPENSES: Expense[] = [
     amount: 80,
     notes: 'Morning tea and biscuits for shop staff and visiting painters.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-13T08:30:00Z'
   },
   {
@@ -623,6 +658,7 @@ export const SAMPLE_EXPENSES: Expense[] = [
     amount: 350,
     notes: 'Auto tempo freight charges for transporting 20 putty bags from godown.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-10T12:00:00Z'
   },
   {
@@ -632,6 +668,7 @@ export const SAMPLE_EXPENSES: Expense[] = [
     amount: 1200,
     notes: 'September month shop electricity bill.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-05T10:00:00Z'
   }
 ];
@@ -697,6 +734,7 @@ export const SAMPLE_ESTIMATES: MaterialEstimate[] = [
     totalEstimatedCost: 9865,
     notes: 'Quotation provided to painter Ramesh for Mr. Suresh Verma flat handover before Diwali.',
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-12T15:00:00Z'
   }
 ];
@@ -718,6 +756,7 @@ export const SAMPLE_PROFESSIONALS: Professional[] = [
     bio: 'Lead contractor for interior & exterior painting. Team of 5 skilled workers. Known for clean work and fast handover.',
     isAvailable: true,
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-01T08:00:00Z'
   },
   {
@@ -735,6 +774,7 @@ export const SAMPLE_PROFESSIONALS: Professional[] = [
     bio: 'Expert in new house concealed plumbing and bathroom remodelling. Reliable 24/7 emergency leakage support.',
     isAvailable: true,
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-02T08:00:00Z'
   },
   {
@@ -752,6 +792,7 @@ export const SAMPLE_PROFESSIONALS: Professional[] = [
     bio: 'Government licensed wireman. Complete wiring for new construction and renovation. Quick troubleshooting.',
     isAvailable: true,
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-03T08:00:00Z'
   },
   {
@@ -769,6 +810,7 @@ export const SAMPLE_PROFESSIONALS: Professional[] = [
     bio: 'Specialist in custom modular kitchens, wardrobes, and high-end hardware fittings like telescopic channels & hinges.',
     isAvailable: true,
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-04T08:00:00Z'
   },
   {
@@ -786,6 +828,7 @@ export const SAMPLE_PROFESSIONALS: Professional[] = [
     bio: 'Designer POP and false ceiling specialist. Creates modern living room & bedroom ceiling designs with clean laser leveling.',
     isAvailable: false,
     isSample: true,
+    recordOrigin: 'sample',
     createdAt: '2026-10-05T08:00:00Z'
   }
 ];

@@ -1,3 +1,8 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { 
   Category, 
   Product, 
@@ -6,9 +11,8 @@ import {
   Contact, 
   Payment, 
   Expense, 
-  MaterialEstimate,
-  SaleItem,
-  Professional
+  MaterialEstimate, 
+  Professional 
 } from '../types';
 import { 
   SAMPLE_CATEGORIES, 
@@ -22,52 +26,66 @@ import {
   SAMPLE_PROFESSIONALS
 } from '../data/sampleData';
 
-const STORAGE_KEYS = {
-  CATEGORIES: 'hsm_categories_v1',
-  PRODUCTS: 'hsm_products_v1',
-  SALES: 'hsm_sales_v1',
-  PURCHASES: 'hsm_purchases_v1',
-  CONTACTS: 'hsm_contacts_v1',
-  PAYMENTS: 'hsm_payments_v1',
-  EXPENSES: 'hsm_expenses_v1',
-  ESTIMATES: 'hsm_estimates_v1',
-  PROFESSIONALS: 'hsm_professionals_v1',
-  INITIALIZED: 'hsm_initialized_v1',
+export const STORAGE_KEYS = {
+  CATEGORIES: 'hsm_categories_v2',
+  PRODUCTS: 'hsm_products_v2',
+  SALES: 'hsm_sales_v2',
+  PURCHASES: 'hsm_purchases_v2',
+  CONTACTS: 'hsm_contacts_v2',
+  PAYMENTS: 'hsm_payments_v2',
+  EXPENSES: 'hsm_expenses_v2',
+  ESTIMATES: 'hsm_estimates_v2',
+  PROFESSIONALS: 'hsm_professionals_v2',
+  INITIALIZED: 'hsm_initialized_v2',
 };
 
-// Safe per-user account key resolver to prevent cross-account data leakage
+// Known seed IDs for demonstration records
+export const SAMPLE_SEED_IDS = new Set([
+  'prod-1', 'prod-2', 'prod-3', 'prod-4', 'prod-5', 'prod-6', 
+  'prod-7', 'prod-8', 'prod-9', 'prod-10', 'prod-11', 'prod-12',
+  'cnt-1', 'cnt-2', 'cnt-3', 'cnt-4', 'cnt-5', 'cnt-6', 'cnt-7',
+  'sale-101', 'sale-102', 'sale-103',
+  'pur-101', 'pur-102',
+  'pay-1', 'pay-2',
+  'exp-1', 'exp-2', 'exp-3',
+  'est-1',
+  'prof-1', 'prof-2', 'prof-3', 'prof-4', 'prof-5',
+]);
+
+let currentNamespaceUid: string | null = null;
+type MutationListener = (action: 'upsert' | 'delete', collection: string, id: string, data?: any) => void;
+let mutationListener: MutationListener | null = null;
+
+/**
+ * Resolved storage key partitioned strictly by active account UID.
+ * Prevents account cross-contamination.
+ */
 function getScopedKey(baseKey: string): string {
-  try {
-    const activeUid = localStorage.getItem('ak_auth_token_v1');
-    if (activeUid && activeUid.trim()) {
-      return `${baseKey}_${activeUid.trim()}`;
-    }
-  } catch {}
-  return baseKey;
+  if (currentNamespaceUid && currentNamespaceUid.trim()) {
+    return `ak_${currentNamespaceUid.trim()}_${baseKey}`;
+  }
+  return `ak_guest_${baseKey}`;
 }
 
-// Safe JSON loader with automatic legacy migration
+/**
+ * Safe JSON loader from active scoped namespace
+ */
 function loadFromStorage<T>(baseKey: string, fallback: T): T {
   try {
     const scopedKey = getScopedKey(baseKey);
-    let item = localStorage.getItem(scopedKey);
-    // If not found in scoped key and we are signed into an account, migrate un-scoped legacy records
-    if (!item && scopedKey !== baseKey) {
-      const legacyItem = localStorage.getItem(baseKey);
-      if (legacyItem) {
-        localStorage.setItem(scopedKey, legacyItem);
-        item = legacyItem;
-      }
-    }
+    const item = localStorage.getItem(scopedKey);
     if (!item) return fallback;
-    return JSON.parse(item) as T;
+    const parsed = JSON.parse(item);
+    return Array.isArray(fallback) && !Array.isArray(parsed) ? fallback : parsed;
   } catch (err) {
     console.error(`Failed to load ${baseKey} from storage:`, err);
     return fallback;
   }
 }
 
-// Safe JSON writer to scoped storage
+/**
+ * Safe JSON writer to active scoped namespace
+ */
 function saveToStorage<T>(baseKey: string, data: T): void {
   try {
     const scopedKey = getScopedKey(baseKey);
@@ -77,34 +95,177 @@ function saveToStorage<T>(baseKey: string, data: T): void {
   }
 }
 
+/**
+ * Positive identification of a sample/demo record
+ */
+export function isSampleRecord(item: { id: string; isSample?: boolean; recordOrigin?: string }): boolean {
+  if (!item) return false;
+  // If explicitly converted to user-owned record, it is NEVER a sample
+  if (item.recordOrigin === 'user') return false;
+  if (item.recordOrigin === 'sample') return true;
+  if (item.isSample === true) return true;
+  return SAMPLE_SEED_IDS.has(item.id);
+}
+
 export class ShopStorage {
-  // Check if initial sample data should be populated
-  static init(): void {
-    const isInit = localStorage.getItem(STORAGE_KEYS.INITIALIZED);
-    if (!isInit) {
-      this.loadDemoData();
-      localStorage.setItem(STORAGE_KEYS.INITIALIZED, 'true');
-    } else {
-      // Ensure professionals/karigars are populated if existing storage was initialized prior
-      const profs = this.getProfessionals();
-      if (!profs || profs.length === 0) {
-        saveToStorage(STORAGE_KEYS.PROFESSIONALS, SAMPLE_PROFESSIONALS);
+  /**
+   * Set active account namespace and clear cached references
+   */
+  static setActiveNamespace(uid: string | null): void {
+    currentNamespaceUid = uid && uid.trim() ? uid.trim() : null;
+  }
+
+  static getActiveNamespace(): string | null {
+    return currentNamespaceUid;
+  }
+
+  static registerMutationListener(listener: MutationListener | null): void {
+    mutationListener = listener;
+  }
+
+  private static notifyMutation(action: 'upsert' | 'delete', collection: string, id: string, data?: any): void {
+    if (mutationListener) {
+      try {
+        mutationListener(action, collection, id, data);
+      } catch (err) {
+        console.warn('Mutation listener warning:', err);
       }
     }
   }
 
-  // Load / Reload demo data (adds sample items)
+  /**
+   * Check if un-scoped legacy data exists on this device
+   */
+  static hasLegacyUnscopedData(): boolean {
+    try {
+      const legacyKeys = [
+        'hsm_products_v1', 'hsm_sales_v1', 'hsm_contacts_v1',
+        'ak_products_v1', 'ak_sales_v1', 'ak_contacts_v1',
+      ];
+      for (const k of legacyKeys) {
+        const val = localStorage.getItem(k);
+        if (val) {
+          const parsed = JSON.parse(val);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            // Check if there are non-sample items
+            const hasReal = parsed.some(item => !isSampleRecord(item));
+            if (hasReal) return true;
+          }
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Explicitly migrate legacy local data into the active account namespace
+   */
+  static migrateLegacyDataToActiveAccount(mode: 'import' | 'dismiss'): { success: boolean; importedCount: number } {
+    if (mode === 'dismiss') {
+      try {
+        localStorage.setItem('ak_legacy_migrated_v2', 'dismissed');
+      } catch {}
+      return { success: true, importedCount: 0 };
+    }
+
+    let count = 0;
+    try {
+      const legacyProds = localStorage.getItem('hsm_products_v1') || localStorage.getItem('ak_products_v1');
+      if (legacyProds) {
+        const parsed = JSON.parse(legacyProds);
+        if (Array.isArray(parsed)) {
+          const realProds = parsed.filter(p => !isSampleRecord(p)).map(p => ({
+            ...p,
+            recordOrigin: 'user' as const,
+            isSample: false,
+          }));
+          if (realProds.length > 0) {
+            const current = this.getProducts();
+            const merged = [...realProds, ...current.filter(c => !realProds.some(r => r.id === c.id))];
+            saveToStorage(STORAGE_KEYS.PRODUCTS, merged);
+            count += realProds.length;
+          }
+        }
+      }
+
+      const legacyContacts = localStorage.getItem('hsm_contacts_v1') || localStorage.getItem('ak_contacts_v1');
+      if (legacyContacts) {
+        const parsed = JSON.parse(legacyContacts);
+        if (Array.isArray(parsed)) {
+          const realContacts = parsed.filter(c => !isSampleRecord(c)).map(c => ({
+            ...c,
+            recordOrigin: 'user' as const,
+            isSample: false,
+          }));
+          if (realContacts.length > 0) {
+            const current = this.getContacts();
+            const merged = [...realContacts, ...current.filter(c => !realContacts.some(r => r.id === c.id))];
+            saveToStorage(STORAGE_KEYS.CONTACTS, merged);
+            count += realContacts.length;
+          }
+        }
+      }
+
+      const legacySales = localStorage.getItem('hsm_sales_v1') || localStorage.getItem('ak_sales_v1');
+      if (legacySales) {
+        const parsed = JSON.parse(legacySales);
+        if (Array.isArray(parsed)) {
+          const realSales = parsed.filter(s => !isSampleRecord(s)).map(s => ({
+            ...s,
+            recordOrigin: 'user' as const,
+            isSample: false,
+          }));
+          if (realSales.length > 0) {
+            const current = this.getSales();
+            const merged = [...realSales, ...current.filter(c => !realSales.some(r => r.id === c.id))];
+            saveToStorage(STORAGE_KEYS.SALES, merged);
+            count += realSales.length;
+          }
+        }
+      }
+
+      localStorage.setItem('ak_legacy_migrated_v2', 'imported');
+      return { success: true, importedCount: count };
+    } catch (err) {
+      console.error('Error during legacy migration:', err);
+      return { success: false, importedCount: count };
+    }
+  }
+
+  /**
+   * Initialize starter data for unauthenticated guest or newly requested demo
+   */
+  static init(): void {
+    const isInit = localStorage.getItem(getScopedKey(STORAGE_KEYS.INITIALIZED));
+    if (!isInit) {
+      // Populate clean default starter categories
+      const categories = this.getCategories();
+      if (categories.length === 0) {
+        saveToStorage(STORAGE_KEYS.CATEGORIES, SAMPLE_CATEGORIES);
+      }
+      const profs = this.getProfessionals();
+      if (profs.length === 0) {
+        saveToStorage(STORAGE_KEYS.PROFESSIONALS, SAMPLE_PROFESSIONALS);
+      }
+      localStorage.setItem(getScopedKey(STORAGE_KEYS.INITIALIZED), 'true');
+    }
+  }
+
+  /**
+   * Load / Reload demo demonstration data (tags every seeded record explicitly as sample)
+   */
   static loadDemoData(): void {
-    // Preserve existing real (non-sample) records, merge or set sample records
-    const existingCategories = this.getCategories().filter(c => !c.isSample);
-    const existingContacts = this.getContacts().filter(c => !c.isSample);
-    const existingProducts = this.getProducts().filter(p => !p.isSample);
-    const existingSales = this.getSales().filter(s => !s.isSample);
-    const existingPurchases = this.getPurchases().filter(p => !p.isSample);
-    const existingPayments = this.getPayments().filter(p => !p.isSample);
-    const existingExpenses = this.getExpenses().filter(e => !e.isSample);
-    const existingEstimates = this.getEstimates().filter(e => !e.isSample);
-    const existingProfessionals = this.getProfessionals().filter(p => !p.isSample);
+    const existingCategories = this.getCategories().filter(c => !isSampleRecord(c));
+    const existingContacts = this.getContacts().filter(c => !isSampleRecord(c));
+    const existingProducts = this.getProducts().filter(p => !isSampleRecord(p));
+    const existingSales = this.getSales().filter(s => !isSampleRecord(s));
+    const existingPurchases = this.getPurchases().filter(p => !isSampleRecord(p));
+    const existingPayments = this.getPayments().filter(p => !isSampleRecord(p));
+    const existingExpenses = this.getExpenses().filter(e => !isSampleRecord(e));
+    const existingEstimates = this.getEstimates().filter(e => !isSampleRecord(e));
+    const existingProfessionals = this.getProfessionals().filter(p => !isSampleRecord(p));
 
     saveToStorage(STORAGE_KEYS.CATEGORIES, [...SAMPLE_CATEGORIES, ...existingCategories]);
     saveToStorage(STORAGE_KEYS.CONTACTS, [...SAMPLE_CONTACTS, ...existingContacts]);
@@ -115,44 +276,98 @@ export class ShopStorage {
     saveToStorage(STORAGE_KEYS.EXPENSES, [...SAMPLE_EXPENSES, ...existingExpenses]);
     saveToStorage(STORAGE_KEYS.ESTIMATES, [...SAMPLE_ESTIMATES, ...existingEstimates]);
     saveToStorage(STORAGE_KEYS.PROFESSIONALS, [...SAMPLE_PROFESSIONALS, ...existingProfessionals]);
+    localStorage.setItem(getScopedKey(STORAGE_KEYS.INITIALIZED), 'true');
   }
 
-  // Remove all demo/sample records, leaving only real shop records
-  static clearDemoData(): void {
-    const isSampleId = (id: string) => {
-      const sampleIds = [
-        'prod-1', 'prod-2', 'prod-3', 'prod-4', 'prod-5', 'prod-6', 
-        'prod-7', 'prod-8', 'prod-9', 'prod-10', 'prod-11', 'prod-12',
-        'cnt-1', 'cnt-2', 'cnt-3', 'cnt-4', 'cnt-5', 'cnt-6', 'cnt-7',
-        'sale-101', 'sale-102', 'sale-103',
-        'pur-101', 'pur-102',
-        'pay-1', 'pay-2',
-        'exp-1', 'exp-2', 'exp-3',
-        'est-1'
-      ];
-      return sampleIds.includes(id);
+  /**
+   * Audit and count verified sample records across all collections
+   */
+  static getSampleCounts(): {
+    total: number;
+    products: number;
+    sales: number;
+    contacts: number;
+    purchases: number;
+    payments: number;
+    expenses: number;
+    estimates: number;
+    professionals: number;
+    categories: number;
+  } {
+    const products = this.getProducts().filter(isSampleRecord).length;
+    const sales = this.getSales().filter(isSampleRecord).length;
+    const contacts = this.getContacts().filter(isSampleRecord).length;
+    const purchases = this.getPurchases().filter(isSampleRecord).length;
+    const payments = this.getPayments().filter(isSampleRecord).length;
+    const expenses = this.getExpenses().filter(isSampleRecord).length;
+    const estimates = this.getEstimates().filter(isSampleRecord).length;
+    const professionals = this.getProfessionals().filter(isSampleRecord).length;
+    const categories = this.getCategories().filter(isSampleRecord).length;
+
+    const total = products + sales + contacts + purchases + payments + expenses + estimates + professionals;
+    return {
+      total,
+      products,
+      sales,
+      contacts,
+      purchases,
+      payments,
+      expenses,
+      estimates,
+      professionals,
+      categories,
+    };
+  }
+
+  static hasDemoData(): boolean {
+    return this.getSampleCounts().total > 0;
+  }
+
+  /**
+   * Remove ONLY verified demonstration/sample records.
+   * Real products, invoices, payments, khata, and settings are 100% PRESERVED.
+   */
+  static clearDemoData(): {
+    clearedTotal: number;
+    details: ReturnType<typeof ShopStorage.getSampleCounts>;
+    sampleDocIds: { [collection: string]: string[] };
+  } {
+    const counts = this.getSampleCounts();
+    const sampleDocIds: { [collection: string]: string[] } = {};
+
+    const findSampleIds = <T extends { id: string }>(items: T[]): string[] => {
+      return items.filter(isSampleRecord).map(i => i.id);
     };
 
-    const realCategories = this.getCategories().filter(c => !c.isSample);
-    const realContacts = this.getContacts().filter(c => !c.isSample && !isSampleId(c.id));
-    const realProducts = this.getProducts().filter(p => !p.isSample && !isSampleId(p.id));
-    const realSales = this.getSales().filter(s => !s.isSample && !isSampleId(s.id));
-    const realPurchases = this.getPurchases().filter(p => !p.isSample && !isSampleId(p.id));
-    const realPayments = this.getPayments().filter(p => !p.isSample && !isSampleId(p.id));
-    const realExpenses = this.getExpenses().filter(e => !e.isSample && !isSampleId(e.id));
-    const realEstimates = this.getEstimates().filter(e => !e.isSample && !isSampleId(e.id));
-    const realProfessionals = this.getProfessionals().filter(p => !p.isSample && !p.id.startsWith('prof-'));
+    sampleDocIds['products'] = findSampleIds(this.getProducts());
+    sampleDocIds['sales'] = findSampleIds(this.getSales());
+    sampleDocIds['contacts'] = findSampleIds(this.getContacts());
+    sampleDocIds['purchases'] = findSampleIds(this.getPurchases());
+    sampleDocIds['payments'] = findSampleIds(this.getPayments());
+    sampleDocIds['expenses'] = findSampleIds(this.getExpenses());
+    sampleDocIds['estimates'] = findSampleIds(this.getEstimates());
+    sampleDocIds['professionals'] = findSampleIds(this.getProfessionals());
 
-    // Keep core categories if user hasn't created their own yet
+    // Filter local storage keeping only real records
+    const realCategories = this.getCategories().filter(c => !isSampleRecord(c));
+    const realContacts = this.getContacts().filter(c => !isSampleRecord(c));
+    const realProducts = this.getProducts().filter(p => !isSampleRecord(p));
+    const realSales = this.getSales().filter(s => !isSampleRecord(s));
+    const realPurchases = this.getPurchases().filter(p => !isSampleRecord(p));
+    const realPayments = this.getPayments().filter(p => !isSampleRecord(p));
+    const realExpenses = this.getExpenses().filter(e => !isSampleRecord(e));
+    const realEstimates = this.getEstimates().filter(e => !isSampleRecord(e));
+    const realProfessionals = this.getProfessionals().filter(p => !isSampleRecord(p));
+
     const fallbackCategories: Category[] = realCategories.length > 0 ? realCategories : [
-      { id: 'cat-paint', name: 'Paint', createdAt: new Date().toISOString() },
-      { id: 'cat-primer', name: 'Primer', createdAt: new Date().toISOString() },
-      { id: 'cat-putty', name: 'Putty', createdAt: new Date().toISOString() },
-      { id: 'cat-pop', name: 'POP', createdAt: new Date().toISOString() },
-      { id: 'cat-adhesive', name: 'Adhesive', createdAt: new Date().toISOString() },
-      { id: 'cat-plumbing', name: 'Plumbing', createdAt: new Date().toISOString() },
-      { id: 'cat-electrical', name: 'Electrical', createdAt: new Date().toISOString() },
-      { id: 'cat-hardware', name: 'Hardware', createdAt: new Date().toISOString() },
+      { id: 'cat-paint', name: 'Paint', recordOrigin: 'user', createdAt: new Date().toISOString() },
+      { id: 'cat-primer', name: 'Primer', recordOrigin: 'user', createdAt: new Date().toISOString() },
+      { id: 'cat-putty', name: 'Putty', recordOrigin: 'user', createdAt: new Date().toISOString() },
+      { id: 'cat-pop', name: 'POP', recordOrigin: 'user', createdAt: new Date().toISOString() },
+      { id: 'cat-adhesive', name: 'Adhesive', recordOrigin: 'user', createdAt: new Date().toISOString() },
+      { id: 'cat-plumbing', name: 'Plumbing', recordOrigin: 'user', createdAt: new Date().toISOString() },
+      { id: 'cat-electrical', name: 'Electrical', recordOrigin: 'user', createdAt: new Date().toISOString() },
+      { id: 'cat-hardware', name: 'Hardware', recordOrigin: 'user', createdAt: new Date().toISOString() },
     ];
 
     saveToStorage(STORAGE_KEYS.CATEGORIES, fallbackCategories);
@@ -164,19 +379,15 @@ export class ShopStorage {
     saveToStorage(STORAGE_KEYS.EXPENSES, realExpenses);
     saveToStorage(STORAGE_KEYS.ESTIMATES, realEstimates);
     saveToStorage(STORAGE_KEYS.PROFESSIONALS, realProfessionals);
+
+    return {
+      clearedTotal: counts.total,
+      details: counts,
+      sampleDocIds,
+    };
   }
 
-  static hasDemoData(): boolean {
-    const products = this.getProducts();
-    const contacts = this.getContacts();
-    const sales = this.getSales();
-    const sampleIds = ['prod-1', 'cnt-1', 'sale-101'];
-    return products.some(p => p.isSample || sampleIds.includes(p.id)) ||
-           contacts.some(c => c.isSample || sampleIds.includes(c.id)) ||
-           sales.some(s => s.isSample || sampleIds.includes(s.id));
-  }
-
-  // CATEGORIES
+  // --- CATEGORIES ---
   static getCategories(): Category[] {
     return loadFromStorage<Category[]>(STORAGE_KEYS.CATEGORIES, []);
   }
@@ -184,12 +395,18 @@ export class ShopStorage {
   static saveCategory(category: Category): void {
     const categories = this.getCategories();
     const index = categories.findIndex(c => c.id === category.id);
+    const updated: Category = {
+      ...category,
+      recordOrigin: 'user',
+      isSample: false,
+    };
     if (index >= 0) {
-      categories[index] = category;
+      categories[index] = updated;
     } else {
-      categories.push(category);
+      categories.push(updated);
     }
     saveToStorage(STORAGE_KEYS.CATEGORIES, categories);
+    this.notifyMutation('upsert', 'categories', updated.id, updated);
   }
 
   static deleteCategory(categoryId: string): { success: boolean; message?: string } {
@@ -200,10 +417,11 @@ export class ShopStorage {
     }
     const categories = this.getCategories().filter(c => c.id !== categoryId);
     saveToStorage(STORAGE_KEYS.CATEGORIES, categories);
+    this.notifyMutation('delete', 'categories', categoryId);
     return { success: true };
   }
 
-  // PRODUCTS
+  // --- PRODUCTS ---
   static getProducts(): Product[] {
     return loadFromStorage<Product[]>(STORAGE_KEYS.PRODUCTS, []);
   }
@@ -215,27 +433,47 @@ export class ShopStorage {
   static saveProduct(product: Product): void {
     const products = this.getProducts();
     const index = products.findIndex(p => p.id === product.id);
+    // User edits convert demo record to permanent user record
+    const updated: Product = {
+      ...product,
+      recordOrigin: 'user',
+      isSample: false,
+      updatedAt: new Date().toISOString(),
+      createdAt: product.createdAt || new Date().toISOString(),
+    };
+
     if (index >= 0) {
-      products[index] = { ...product, updatedAt: new Date().toISOString() };
+      products[index] = updated;
     } else {
-      products.unshift({ ...product, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+      products.unshift(updated);
     }
     saveToStorage(STORAGE_KEYS.PRODUCTS, products);
+    this.notifyMutation('upsert', 'products', updated.id, updated);
   }
 
   static deleteProduct(productId: string): void {
     const products = this.getProducts().filter(p => p.id !== productId);
     saveToStorage(STORAGE_KEYS.PRODUCTS, products);
+    this.notifyMutation('delete', 'products', productId);
   }
 
-  // PURCHASES / RESTOCKING
+  // --- PURCHASES ---
   static getPurchases(): Purchase[] {
     return loadFromStorage<Purchase[]>(STORAGE_KEYS.PURCHASES, []);
   }
 
   static recordPurchase(purchase: Purchase): void {
     const purchases = this.getPurchases();
-    purchases.unshift(purchase);
+    // Idempotency check: don't double record identical purchase ID
+    const existingIndex = purchases.findIndex(p => p.id === purchase.id);
+    if (existingIndex >= 0) return;
+
+    const record: Purchase = {
+      ...purchase,
+      recordOrigin: 'user',
+      isSample: false,
+    };
+    purchases.unshift(record);
     saveToStorage(STORAGE_KEYS.PURCHASES, purchases);
 
     // Increase product stock
@@ -243,23 +481,27 @@ export class ShopStorage {
     const prodIndex = products.findIndex(p => p.id === purchase.productId);
     if (prodIndex >= 0) {
       products[prodIndex].currentStock += purchase.quantity;
-      products[prodIndex].purchasePrice = purchase.purchasePrice; // update latest cost
+      products[prodIndex].purchasePrice = purchase.purchasePrice;
       products[prodIndex].updatedAt = new Date().toISOString();
       saveToStorage(STORAGE_KEYS.PRODUCTS, products);
+      this.notifyMutation('upsert', 'products', products[prodIndex].id, products[prodIndex]);
     }
 
-    // If purchase has an unpaid balance and a supplier is specified, update supplier dues (negative balance = we owe them)
+    // Update supplier ledger if balance is due
     if (purchase.supplierId && purchase.remainingBalance > 0) {
       const contacts = this.getContacts();
       const contactIndex = contacts.findIndex(c => c.id === purchase.supplierId);
       if (contactIndex >= 0) {
         contacts[contactIndex].creditBalance -= purchase.remainingBalance;
         saveToStorage(STORAGE_KEYS.CONTACTS, contacts);
+        this.notifyMutation('upsert', 'contacts', contacts[contactIndex].id, contacts[contactIndex]);
       }
     }
+
+    this.notifyMutation('upsert', 'purchases', record.id, record);
   }
 
-  // SALES / BILLING
+  // --- SALES / BILLING ---
   static getSales(): Sale[] {
     return loadFromStorage<Sale[]>(STORAGE_KEYS.SALES, []);
   }
@@ -269,14 +511,7 @@ export class ShopStorage {
   }
 
   /**
-   * Finalises or creates a bill with strict inventory validation.
-   * If itemised:
-   *  - Checks stock availability (unless allowNegativeStock is explicitly allowed).
-   *  - Deducts sold quantities exactly once.
-   *  - Updates customer credit if unpaid balance.
-   * If amount-only:
-   *  - Deducts zero stock.
-   *  - Records transaction amount and customer balance if applicable.
+   * Idempotent bill processing with single-deduction stock guarantee
    */
   static processBill(
     sale: Sale, 
@@ -284,6 +519,15 @@ export class ShopStorage {
   ): { success: boolean; error?: string; sale: Sale } {
     const products = this.getProducts();
     const contacts = this.getContacts();
+    const sales = this.getSales();
+
+    const existingIndex = sales.findIndex(s => s.id === sale.id);
+    const existingSale = existingIndex >= 0 ? sales[existingIndex] : null;
+
+    // Idempotency: If already finalized and stock deducted, do not deduct again
+    if (existingSale && existingSale.status === 'finalised' && existingSale.stockDeducted) {
+      return { success: true, sale: existingSale };
+    }
 
     // 1. Stock check if itemised and finalising
     if (sale.type === 'itemised' && sale.status === 'finalised' && !sale.stockDeducted) {
@@ -309,39 +553,35 @@ export class ShopStorage {
         if (prodIndex >= 0) {
           products[prodIndex].currentStock -= item.quantity;
           products[prodIndex].updatedAt = new Date().toISOString();
+          this.notifyMutation('upsert', 'products', products[prodIndex].id, products[prodIndex]);
         }
       }
       sale.stockDeducted = true;
       saveToStorage(STORAGE_KEYS.PRODUCTS, products);
     }
 
-    // 2. Customer credit balance update if finalised and has remaining due (Udhaar)
+    // 2. Customer credit balance update if finalised and has remaining balance
     if (sale.status === 'finalised' && sale.remainingBalance > 0) {
       let contactIndex = -1;
-
       if (sale.customerId) {
         contactIndex = contacts.findIndex(c => c.id === sale.customerId);
       }
-      
-      // If not found by ID, try matching by phone or exact name
       if (contactIndex < 0 && sale.customerPhone && sale.customerPhone.trim()) {
         contactIndex = contacts.findIndex(c => c.phone && c.phone.trim() === sale.customerPhone!.trim());
       }
-
       if (contactIndex < 0 && sale.customerName && sale.customerName.trim() && sale.customerName !== 'Walk-in Customer' && sale.customerName !== 'Cash Customer') {
         contactIndex = contacts.findIndex(c => c.name.trim().toLowerCase() === sale.customerName.trim().toLowerCase());
       }
 
       if (contactIndex >= 0) {
-        // Customer owes us the remaining balance
         contacts[contactIndex].creditBalance += sale.remainingBalance;
         if (sale.customerPhone && !contacts[contactIndex].phone) {
           contacts[contactIndex].phone = sale.customerPhone;
         }
         sale.customerId = contacts[contactIndex].id;
         sale.customerName = contacts[contactIndex].name;
+        this.notifyMutation('upsert', 'contacts', contacts[contactIndex].id, contacts[contactIndex]);
       } else {
-        // Automatically create customer record so Udhar is immediately visible in Khata
         const effectiveName = (sale.customerName && sale.customerName !== 'Walk-in Customer' && sale.customerName !== 'Cash Customer')
           ? sale.customerName.trim()
           : `Customer (${sale.customerPhone ? sale.customerPhone : sale.billNumber})`;
@@ -353,56 +593,38 @@ export class ShopStorage {
           profession: 'customer',
           location: '',
           creditBalance: sale.remainingBalance,
+          recordOrigin: 'user',
+          isSample: false,
           notes: `Added from Udhar bill ${sale.billNumber} (${new Date().toLocaleDateString()})`,
           createdAt: new Date().toISOString()
         };
         contacts.unshift(newContact);
         sale.customerId = newContact.id;
         sale.customerName = effectiveName;
+        this.notifyMutation('upsert', 'contacts', newContact.id, newContact);
       }
       saveToStorage(STORAGE_KEYS.CONTACTS, contacts);
     }
 
-    // Save or update sale
-    const sales = this.getSales();
-    const existingIndex = sales.findIndex(s => s.id === sale.id);
+    const finalizedSale: Sale = {
+      ...sale,
+      recordOrigin: 'user',
+      isSample: false,
+    };
+
     if (existingIndex >= 0) {
-      sales[existingIndex] = sale;
+      sales[existingIndex] = finalizedSale;
     } else {
-      sales.unshift(sale);
+      sales.unshift(finalizedSale);
     }
     saveToStorage(STORAGE_KEYS.SALES, sales);
+    this.notifyMutation('upsert', 'sales', finalizedSale.id, finalizedSale);
 
-    return { success: true, sale };
+    return { success: true, sale: finalizedSale };
   }
 
   /**
-   * Reset all app data for current account.
-   * Authorized by ResetModal via Firebase reauthentication + dynamic verification code.
-   */
-  static factoryReset(): { success: boolean; error?: string } {
-    try {
-      const keys = Object.values(STORAGE_KEYS);
-      for (const k of keys) {
-        localStorage.removeItem(k);
-        const scopedKey = getScopedKey(k);
-        if (scopedKey !== k) {
-          localStorage.removeItem(scopedKey);
-        }
-      }
-
-      // Re-initialize starter state
-      this.init();
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e?.message || 'Failed to reset application.' };
-    }
-  }
-
-  /**
-   * Cancel a bill.
-   * If stock was deducted, restores it back to inventory exactly once.
-   * If customer credit was applied, reverses it.
+   * Cancel bill and restore stock + credit balance atomically
    */
   static cancelBill(saleId: string): { success: boolean; message: string } {
     const sales = this.getSales();
@@ -422,6 +644,7 @@ export class ShopStorage {
         if (pIndex >= 0) {
           products[pIndex].currentStock += item.quantity;
           products[pIndex].updatedAt = new Date().toISOString();
+          this.notifyMutation('upsert', 'products', products[pIndex].id, products[pIndex]);
         }
       }
       saveToStorage(STORAGE_KEYS.PRODUCTS, products);
@@ -435,17 +658,19 @@ export class ShopStorage {
       if (cIndex >= 0) {
         contacts[cIndex].creditBalance -= sale.remainingBalance;
         saveToStorage(STORAGE_KEYS.CONTACTS, contacts);
+        this.notifyMutation('upsert', 'contacts', contacts[cIndex].id, contacts[cIndex]);
       }
     }
 
     sale.status = 'cancelled';
     sales[saleIndex] = sale;
     saveToStorage(STORAGE_KEYS.SALES, sales);
+    this.notifyMutation('upsert', 'sales', sale.id, sale);
 
     return { success: true, message: 'Bill cancelled and stock restored successfully.' };
   }
 
-  // CONTACTS & KHATA (CREDIT)
+  // --- CONTACTS ---
   static getContacts(): Contact[] {
     return loadFromStorage<Contact[]>(STORAGE_KEYS.CONTACTS, []);
   }
@@ -457,27 +682,39 @@ export class ShopStorage {
   static saveContact(contact: Contact): void {
     const contacts = this.getContacts();
     const index = contacts.findIndex(c => c.id === contact.id);
+    const updated: Contact = {
+      ...contact,
+      recordOrigin: 'user',
+      isSample: false,
+    };
     if (index >= 0) {
-      contacts[index] = contact;
+      contacts[index] = updated;
     } else {
-      contacts.unshift(contact);
+      contacts.unshift(updated);
     }
     saveToStorage(STORAGE_KEYS.CONTACTS, contacts);
+    this.notifyMutation('upsert', 'contacts', updated.id, updated);
   }
 
   static deleteContact(contactId: string): void {
     const contacts = this.getContacts().filter(c => c.id !== contactId);
     saveToStorage(STORAGE_KEYS.CONTACTS, contacts);
+    this.notifyMutation('delete', 'contacts', contactId);
   }
 
-  // PAYMENTS
+  // --- PAYMENTS ---
   static getPayments(): Payment[] {
     return loadFromStorage<Payment[]>(STORAGE_KEYS.PAYMENTS, []);
   }
 
   static recordPayment(payment: Payment): void {
     const payments = this.getPayments();
-    payments.unshift(payment);
+    const record: Payment = {
+      ...payment,
+      recordOrigin: 'user',
+      isSample: false,
+    };
+    payments.unshift(record);
     saveToStorage(STORAGE_KEYS.PAYMENTS, payments);
 
     // Update contact balance
@@ -485,33 +722,41 @@ export class ShopStorage {
     const cIndex = contacts.findIndex(c => c.id === payment.contactId);
     if (cIndex >= 0) {
       if (payment.type === 'customer_payment') {
-        // Customer paid us -> decreases their outstanding debit
         contacts[cIndex].creditBalance -= payment.amount;
       } else {
-        // We paid supplier -> reduces our debt (makes creditBalance less negative)
         contacts[cIndex].creditBalance += payment.amount;
       }
       saveToStorage(STORAGE_KEYS.CONTACTS, contacts);
+      this.notifyMutation('upsert', 'contacts', contacts[cIndex].id, contacts[cIndex]);
     }
+
+    this.notifyMutation('upsert', 'payments', record.id, record);
   }
 
-  // EXPENSES
+  // --- EXPENSES ---
   static getExpenses(): Expense[] {
     return loadFromStorage<Expense[]>(STORAGE_KEYS.EXPENSES, []);
   }
 
   static recordExpense(expense: Expense): void {
     const expenses = this.getExpenses();
-    expenses.unshift(expense);
+    const record: Expense = {
+      ...expense,
+      recordOrigin: 'user',
+      isSample: false,
+    };
+    expenses.unshift(record);
     saveToStorage(STORAGE_KEYS.EXPENSES, expenses);
+    this.notifyMutation('upsert', 'expenses', record.id, record);
   }
 
   static deleteExpense(expenseId: string): void {
     const expenses = this.getExpenses().filter(e => e.id !== expenseId);
     saveToStorage(STORAGE_KEYS.EXPENSES, expenses);
+    this.notifyMutation('delete', 'expenses', expenseId);
   }
 
-  // MATERIAL ESTIMATES
+  // --- ESTIMATES ---
   static getEstimates(): MaterialEstimate[] {
     return loadFromStorage<MaterialEstimate[]>(STORAGE_KEYS.ESTIMATES, []);
   }
@@ -519,45 +764,57 @@ export class ShopStorage {
   static saveEstimate(estimate: MaterialEstimate): void {
     const estimates = this.getEstimates();
     const index = estimates.findIndex(e => e.id === estimate.id);
+    const updated: MaterialEstimate = {
+      ...estimate,
+      recordOrigin: 'user',
+      isSample: false,
+    };
     if (index >= 0) {
-      estimates[index] = estimate;
+      estimates[index] = updated;
     } else {
-      estimates.unshift(estimate);
+      estimates.unshift(updated);
     }
     saveToStorage(STORAGE_KEYS.ESTIMATES, estimates);
+    this.notifyMutation('upsert', 'estimates', updated.id, updated);
   }
 
   static deleteEstimate(estimateId: string): void {
     const estimates = this.getEstimates().filter(e => e.id !== estimateId);
     saveToStorage(STORAGE_KEYS.ESTIMATES, estimates);
+    this.notifyMutation('delete', 'estimates', estimateId);
   }
 
-  // PROFESSIONALS & CRAFTSMEN DIRECTORY
+  // --- PROFESSIONALS ---
   static getProfessionals(): Professional[] {
     return loadFromStorage<Professional[]>(STORAGE_KEYS.PROFESSIONALS, []);
-  }
-
-  static getProfessionalById(id: string): Professional | undefined {
-    return this.getProfessionals().find(p => p.id === id);
   }
 
   static saveProfessional(prof: Professional): void {
     const list = this.getProfessionals();
     const index = list.findIndex(p => p.id === prof.id);
+    const updated: Professional = {
+      ...prof,
+      recordOrigin: 'user',
+      isSample: false,
+    };
     if (index >= 0) {
-      list[index] = prof;
+      list[index] = updated;
     } else {
-      list.unshift(prof);
+      list.unshift(updated);
     }
     saveToStorage(STORAGE_KEYS.PROFESSIONALS, list);
+    this.notifyMutation('upsert', 'professionals', updated.id, updated);
   }
 
   static deleteProfessional(profId: string): void {
     const list = this.getProfessionals().filter(p => p.id !== profId);
     saveToStorage(STORAGE_KEYS.PROFESSIONALS, list);
+    this.notifyMutation('delete', 'professionals', profId);
   }
 
-  // Load custom dataset (used for cloud sync and JSON import)
+  /**
+   * Bulk load authoritative dataset (used during initial cloud hydration)
+   */
   static loadCustomData(data: {
     categories?: Category[];
     products?: Product[];
@@ -578,10 +835,12 @@ export class ShopStorage {
     if (data.expenses) saveToStorage(STORAGE_KEYS.EXPENSES, data.expenses);
     if (data.estimates) saveToStorage(STORAGE_KEYS.ESTIMATES, data.estimates);
     if (data.professionals) saveToStorage(STORAGE_KEYS.PROFESSIONALS, data.professionals);
-    localStorage.setItem(STORAGE_KEYS.INITIALIZED, 'true');
+    localStorage.setItem(getScopedKey(STORAGE_KEYS.INITIALIZED), 'true');
   }
 
-  // Export full JSON database for local or cloud backup
+  /**
+   * Export full JSON backup
+   */
   static exportBackupJSON(): string {
     const categories = this.getCategories();
     const products = this.getProducts();
@@ -594,7 +853,7 @@ export class ShopStorage {
     const professionals = this.getProfessionals();
 
     const backup = {
-      version: '2.2',
+      version: '3.0',
       exportedAt: new Date().toISOString(),
       shopName: localStorage.getItem('ak_shop_name') || 'Hardware Store',
       shopAddress: localStorage.getItem('ak_shop_address') || '',
@@ -624,227 +883,19 @@ export class ShopStorage {
     return JSON.stringify(backup, null, 2);
   }
 
-  // Inspect and preview a backup file before importing
-  static inspectBackupJSON(jsonString: string): {
-    isValid: boolean;
-    error?: string;
-    details?: {
-      version: string;
-      exportedAt: string;
-      shopName: string;
-      productsCount: number;
-      salesCount: number;
-      contactsCount: number;
-      categoriesCount: number;
-      professionalsCount: number;
-      parsedData: any;
-    };
-  } {
+  /**
+   * Reset local partition for current account
+   */
+  static factoryReset(): { success: boolean; error?: string } {
     try {
-      const parsed = JSON.parse(jsonString);
-      if (!parsed || typeof parsed !== 'object') {
-        return { isValid: false, error: 'File is not a valid JSON database.' };
+      const keys = Object.values(STORAGE_KEYS);
+      for (const k of keys) {
+        localStorage.removeItem(getScopedKey(k));
       }
-
-      const products = Array.isArray(parsed.products) ? parsed.products : [];
-      const sales = Array.isArray(parsed.sales) ? parsed.sales : [];
-      const contacts = Array.isArray(parsed.contacts) ? parsed.contacts : [];
-      const categories = Array.isArray(parsed.categories) ? parsed.categories : [];
-      const professionals = Array.isArray(parsed.professionals) ? parsed.professionals : [];
-
-      if (products.length === 0 && sales.length === 0 && contacts.length === 0) {
-        return { isValid: false, error: 'Backup file contains no recognizable shop records.' };
-      }
-
-      return {
-        isValid: true,
-        details: {
-          version: parsed.version || '1.0',
-          exportedAt: parsed.exportedAt || new Date().toISOString(),
-          shopName: parsed.shopName || 'Unknown Store',
-          productsCount: products.length,
-          salesCount: sales.length,
-          contactsCount: contacts.length,
-          categoriesCount: categories.length,
-          professionalsCount: professionals.length,
-          parsedData: parsed,
-        },
-      };
-    } catch (err: any) {
-      return { isValid: false, error: err?.message || 'Failed to parse JSON backup.' };
-    }
-  }
-
-  // Import JSON database backup with either 'merge' or 'replace' mode
-  static importBackupJSON(jsonString: string, mode: 'merge' | 'replace' = 'replace'): { success: boolean; error?: string } {
-    try {
-      const inspect = this.inspectBackupJSON(jsonString);
-      if (!inspect.isValid || !inspect.details) {
-        return { success: false, error: inspect.error || 'Invalid backup file.' };
-      }
-
-      const data = inspect.details.parsedData;
-
-      if (mode === 'replace') {
-        // Complete point-in-time replacement
-        this.loadCustomData(data);
-      } else {
-        // Intelligent merge: combine existing items with backup items using ID matching
-        const mergeArrays = <T extends { id: string }>(current: T[], incoming?: T[]): T[] => {
-          if (!incoming || !Array.isArray(incoming)) return current;
-          const map = new Map<string, T>();
-          current.forEach(item => map.set(item.id, item));
-          incoming.forEach(item => {
-            // Incoming item updates or adds
-            map.set(item.id, item);
-          });
-          return Array.from(map.values());
-        };
-
-        const mergedCategories = mergeArrays(this.getCategories(), data.categories);
-        const mergedProducts = mergeArrays(this.getProducts(), data.products);
-        const mergedSales = mergeArrays(this.getSales(), data.sales);
-        const mergedPurchases = mergeArrays(this.getPurchases(), data.purchases);
-        const mergedContacts = mergeArrays(this.getContacts(), data.contacts);
-        const mergedPayments = mergeArrays(this.getPayments(), data.payments);
-        const mergedExpenses = mergeArrays(this.getExpenses(), data.expenses);
-        const mergedEstimates = mergeArrays(this.getEstimates(), data.estimates);
-        const mergedProfessionals = mergeArrays(this.getProfessionals(), data.professionals);
-
-        this.loadCustomData({
-          categories: mergedCategories,
-          products: mergedProducts,
-          sales: mergedSales,
-          purchases: mergedPurchases,
-          contacts: mergedContacts,
-          payments: mergedPayments,
-          expenses: mergedExpenses,
-          estimates: mergedEstimates,
-          professionals: mergedProfessionals,
-        });
-      }
-
-      if (data.shopName && mode === 'replace') {
-        localStorage.setItem('ak_shop_name', data.shopName);
-      }
-      if (data.shopAddress && mode === 'replace') {
-        localStorage.setItem('ak_shop_address', data.shopAddress);
-      }
-      if (data.shopPhone && mode === 'replace') {
-        localStorage.setItem('ak_shop_phone', data.shopPhone);
-      }
-      if (data.shopUpiId && mode === 'replace') {
-        localStorage.setItem('ak_shop_upi_id', data.shopUpiId);
-      }
-
+      this.init();
       return { success: true };
-    } catch (err: any) {
-      return { success: false, error: err?.message || 'Failed to import backup.' };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Failed to reset application.' };
     }
-  }
-
-  // Export tables as clean Excel-compatible CSV with UTF-8 BOM
-  static exportCSV(type: 'products' | 'sales' | 'contacts'): string {
-    const escapeCsv = (val: any): string => {
-      if (val === null || val === undefined) return '""';
-      const str = String(val).replace(/"/g, '""');
-      return `"${str}"`;
-    };
-
-    let headers: string[] = [];
-    let rows: string[][] = [];
-
-    if (type === 'products') {
-      headers = [
-        'Item ID',
-        'Product Name',
-        'Brand',
-        'Item Code',
-        'Category ID',
-        'Buying Price (INR)',
-        'Selling Price (INR)',
-        'Current Stock',
-        'Unit',
-        'Min Stock Alert'
-      ];
-      const products = this.getProducts();
-      rows = products.map(p => [
-        p.id,
-        p.name,
-        p.brand || '',
-        p.code || '',
-        p.categoryId,
-        String(p.purchasePrice || 0),
-        String(p.sellingPrice || 0),
-        String(p.currentStock || 0),
-        p.unit,
-        String(p.minStock || 0)
-      ]);
-    } else if (type === 'sales') {
-      headers = [
-        'Sale ID',
-        'Bill Number',
-        'Date & Time',
-        'Customer Name',
-        'Customer Phone',
-        'Payment Method',
-        'Subtotal (INR)',
-        'Discount (INR)',
-        'Total Amount (INR)',
-        'Amount Received (INR)',
-        'Pending Balance (INR)',
-        'Items Count',
-        'Notes'
-      ];
-      const sales = this.getSales();
-      rows = sales.map(s => [
-        s.id,
-        s.billNumber || '',
-        s.createdAt || s.date || '',
-        s.customerName,
-        s.customerPhone || '',
-        s.paymentMethod,
-        String(s.subtotal || 0),
-        String(s.discount || 0),
-        String(s.totalAmount || 0),
-        String(s.amountReceived || 0),
-        String(s.remainingBalance || 0),
-        String(s.items?.length || 0),
-        s.notes || ''
-      ]);
-    } else if (type === 'contacts') {
-      headers = [
-        'Contact ID',
-        'Full Name',
-        'Phone Number',
-        'Alternate Phone',
-        'Profession / Role',
-        'Credit Balance / Udhar (INR)',
-        'Location / Address',
-        'GST Number',
-        'Created Date'
-      ];
-      const contacts = this.getContacts();
-      rows = contacts.map(c => [
-        c.id,
-        c.name,
-        c.phone,
-        c.alternatePhone || '',
-        c.profession,
-        String(c.creditBalance || 0),
-        c.address || c.location || '',
-        c.gstNumber || '',
-        c.createdAt || ''
-      ]);
-    }
-
-    const bom = '\uFEFF';
-    const csvContent = [
-      headers.map(escapeCsv).join(','),
-      ...rows.map(row => row.map(escapeCsv).join(','))
-    ].join('\r\n');
-
-    return bom + csvContent;
   }
 }
-

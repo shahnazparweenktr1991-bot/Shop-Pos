@@ -12,6 +12,14 @@ export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 // Initialize Firebase Authentication
 export const auth = getAuth(app);
 
+// Configure browser session persistence so owner stays logged in across restarts
+import { setPersistence, browserLocalPersistence } from 'firebase/auth';
+if (typeof window !== 'undefined') {
+  setPersistence(auth, browserLocalPersistence).catch((err) => {
+    console.warn('Firebase session persistence setup:', err);
+  });
+}
+
 // Error handler helper matching Firebase Integration Skill specifications
 export enum OperationType {
   CREATE = 'create',

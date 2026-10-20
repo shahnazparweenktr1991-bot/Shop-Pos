@@ -35,7 +35,10 @@ import {
   Globe,
   FolderArchive,
   History,
-  CloudUpload
+  CloudUpload,
+  Activity,
+  Copy,
+  CheckCheck
 } from 'lucide-react';
 import { cloudSync, UserProfile, SyncStatus } from '../utils/cloudSync';
 import { ShopStorage } from '../utils/storage';
@@ -99,26 +102,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [voiceLanguage, setVoiceLanguage] = useState<VoiceLanguage>(() => voiceAssistant.getLanguage());
   const [voicePersona, setVoicePersona] = useState<VoicePersona>(() => voiceAssistant.getPersona());
 
-  // Refined Backup & Restore State
-  const [isSavingSnapshot, setIsSavingSnapshot] = useState(false);
-  const [cloudSnapshots, setCloudSnapshots] = useState<Array<{ id: string; label: string; createdAt: string; shopName: string; stats: any }>>([]);
-  const [showCloudSnapshots, setShowCloudSnapshots] = useState(false);
-  const [loadingSnapshots, setLoadingSnapshots] = useState(false);
 
-  // Restore Confirmation Modal State
-  const [restoreModalOpen, setRestoreModalOpen] = useState(false);
-  const [restoreFileRaw, setRestoreFileRaw] = useState<string | null>(null);
-  const [restoreCloudId, setRestoreCloudId] = useState<string | null>(null);
-  const [restoreDetails, setRestoreDetails] = useState<{
-    version: string;
-    exportedAt: string;
-    shopName: string;
-    productsCount: number;
-    salesCount: number;
-    contactsCount: number;
-    categoriesCount: number;
-    professionalsCount: number;
-  } | null>(null);
 
   // FEATURE 2: UPI QR Code & Payment Info
   const [shopUpiId, setShopUpiId] = useState(() => localStorage.getItem('ak_shop_upi_id') || '');
@@ -295,11 +279,65 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  const handleLogout = () => {
-    cloudSync.logout();
+  const [copiedDiag, setCopiedDiag] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+
+  const handleLogout = async () => {
+    await cloudSync.logout();
     setCurrentUser(null);
-    showToast('Signed out of cloud sync. Local data is retained.');
+    onDataRefresh();
+    showToast('Signed out successfully. Previous account records detached.');
     sounds.playTap();
+  };
+
+  const handleSendPasswordReset = async () => {
+    const cleanEmail = authEmail.trim();
+    if (!cleanEmail) {
+      setAuthError('Please enter your account email address above first, then click "Forgot Password".');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      const res = await cloudSync.sendPasswordReset(cleanEmail);
+      if (res.success) {
+        showToast(`Password reset link sent to ${cleanEmail}! Please check your inbox or spam.`);
+      } else {
+        setAuthError(res.error || 'Failed to send reset email');
+      }
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleCopyDiagnostics = () => {
+    const diag = cloudSync.getDiagnostics();
+    const text = [
+      '--- A.K. HARDWARE DIAGNOSTICS REPORT ---',
+      `Timestamp: ${new Date().toISOString()}`,
+      `App Version: ${diag.appVersion}`,
+      `Auth Status: ${diag.authStatus}`,
+      `Account Masked: ${diag.userEmailMasked || 'None (Guest)'} (${diag.userIdMasked || 'None'})`,
+      `Sync Status: ${diag.syncStatus}`,
+      `Network Online: ${diag.isOnline ? 'Yes' : 'No'}`,
+      `Initial Hydration: ${diag.initialHydrationComplete ? 'Complete' : 'In Progress / Pending'}`,
+      `Last Sync: ${diag.lastSuccessfulSync || 'Never'}`,
+      `Pending Writes: ${diag.pendingWritesCount}`,
+      `Products: ${diag.collectionCounts.products} | Bills: ${diag.collectionCounts.sales} | Contacts: ${diag.collectionCounts.contacts}`,
+      `Purchases: ${diag.collectionCounts.purchases} | Payments: ${diag.collectionCounts.payments} | Expenses: ${diag.collectionCounts.expenses}`,
+      `Verified Sample Records: ${diag.sampleRecordsCount}`,
+      `Last Error: ${diag.lastError || 'None'}`,
+      '----------------------------------------'
+    ].join('\n');
+
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedDiag(true);
+      setTimeout(() => setCopiedDiag(false), 2500);
+      showToast('Sanitized diagnostics report copied to clipboard!');
+      sounds.playTap();
+    }).catch(() => {
+      showToast('Could not copy report to clipboard.');
+    });
   };
 
   const handleManualSync = async () => {
@@ -326,142 +364,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     showToast(next ? 'Automatic background sync ON' : 'Automatic sync OFF');
   };
 
-  // Export full JSON database
-  const handleExportBackup = () => {
-    try {
-      const jsonStr = ShopStorage.exportBackupJSON();
-      const blob = new Blob([jsonStr], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      const cleanName = shopName.replace(/[^a-zA-Z0-9]/g, '_');
-      a.download = `${cleanName}-Backup-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      sounds.playPaymentSuccess();
-      showToast('Full shop JSON backup downloaded successfully!');
-    } catch {
-      showToast('Failed to export backup file.');
-    }
-  };
 
-  // Export Excel CSV
-  const handleExportCSV = (tableType: 'products' | 'sales' | 'contacts') => {
-    try {
-      const csvStr = ShopStorage.exportCSV(tableType);
-      const blob = new Blob([csvStr], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      const cleanName = shopName.replace(/[^a-zA-Z0-9]/g, '_');
-      const tableLabel = tableType === 'products' ? 'Products-Stock' : tableType === 'sales' ? 'Sales-Ledger' : 'Khata-Contacts';
-      a.download = `${cleanName}-${tableLabel}-${new Date().toISOString().slice(0, 10)}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      sounds.playPaymentSuccess();
-      showToast(`${tableLabel} Excel CSV downloaded!`);
-    } catch {
-      showToast('Failed to export CSV file.');
-    }
-  };
-
-  // Push snapshot to Firebase Cloud
-  const handleSaveCloudSnapshot = async () => {
-    if (!currentUser) {
-      showToast('Please sign in or create an account to save cloud backups.');
-      return;
-    }
-    setIsSavingSnapshot(true);
-    sounds.playTap();
-    try {
-      const res = await cloudSync.saveCloudBackupSnapshot();
-      if (res.success) {
-        sounds.playPaymentSuccess();
-        showToast('Backup snapshot saved to Firebase Cloud under your account!');
-        handleLoadCloudSnapshots();
-      } else {
-        showToast(`Cloud snapshot failed: ${res.error}`);
-      }
-    } finally {
-      setIsSavingSnapshot(false);
-    }
-  };
-
-  // Load cloud snapshots
-  const handleLoadCloudSnapshots = async () => {
-    if (!currentUser) return;
-    setLoadingSnapshots(true);
-    try {
-      const list = await cloudSync.listCloudBackupSnapshots();
-      setCloudSnapshots(list);
-    } finally {
-      setLoadingSnapshots(false);
-    }
-  };
-
-  // Inspect local file for restore
-  const handleFileSelectedForRestore = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const content = event.target?.result as string;
-      const inspected = ShopStorage.inspectBackupJSON(content);
-      if (!inspected.isValid || !inspected.details) {
-        sounds.playWarning();
-        showToast(inspected.error || 'Invalid backup file.');
-        return;
-      }
-      setRestoreFileRaw(content);
-      setRestoreCloudId(null);
-      setRestoreDetails(inspected.details);
-      setRestoreModalOpen(true);
-      sounds.playTap();
-    };
-    reader.readAsText(file);
-    e.target.value = '';
-  };
-
-  // Execute restore with chosen mode (Merge vs Replace)
-  const handleExecuteRestore = async (mode: 'merge' | 'replace') => {
-    if (restoreCloudId) {
-      // Cloud snapshot restore
-      try {
-        const res = await cloudSync.restoreFromCloudSnapshot(restoreCloudId, mode);
-        if (res.success) {
-          onDataRefresh();
-          sounds.playPaymentSuccess();
-          showToast(mode === 'merge' ? 'Cloud backup merged into your shop database!' : 'Cloud backup restored cleanly!');
-          setRestoreModalOpen(false);
-          setShowCloudSnapshots(false);
-        } else {
-          showToast(`Restore failed: ${res.error}`);
-        }
-      } catch (err: any) {
-        showToast(err?.message || 'Restore failed.');
-      }
-    } else if (restoreFileRaw) {
-      // Local file restore
-      const res = ShopStorage.importBackupJSON(restoreFileRaw, mode);
-      if (res.success) {
-        onDataRefresh();
-        sounds.playPaymentSuccess();
-        showToast(mode === 'merge' ? `Backup merged successfully into ${shopName}!` : `Clean point-in-time backup restored into ${shopName}!`);
-        setRestoreModalOpen(false);
-        // Automatically sync to cloud if logged in
-        if (currentUser) {
-          cloudSync.pushToCloud().catch(() => {});
-        }
-      } else {
-        showToast(`Import error: ${res.error}`);
-      }
-    }
-  };
 
   return (
     <div className="pb-28 pt-3 px-3 max-w-lg mx-auto space-y-4 animate-in fade-in duration-150">
@@ -659,6 +562,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     className="w-full pl-9 pr-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium text-slate-900 dark:text-white focus:bg-white dark:focus:bg-slate-900"
                   />
                 </div>
+                {authMode === 'login' && (
+                  <div className="flex justify-end pt-1">
+                    <button
+                      type="button"
+                      onClick={handleSendPasswordReset}
+                      className="text-[11px] font-bold text-amber-600 dark:text-amber-400 hover:underline cursor-pointer"
+                    >
+                      Forgot Password?
+                    </button>
+                  </div>
+                )}
               </div>
 
               {authMode === 'register' && (
@@ -1174,118 +1088,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </button>
       </div>
 
-      {/* 8. DATA BACKUP & RESTORE (REFINED DUAL-FORMAT & CLOUD SNAPSHOTS) */}
-      <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4 shadow-xs space-y-3.5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center">
-              <FolderArchive className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="font-bold text-sm text-slate-900 dark:text-white">Shop Data Backup & Restore</h3>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                Export JSON, Excel CSV sheets, and Firebase cloud backup snapshots
-              </p>
-            </div>
-          </div>
-        </div>
 
-        {/* Export Options Grid */}
-        <div className="space-y-2">
-          <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 block">
-            1. Export Shop Database (Download on Demand):
-          </span>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={handleExportBackup}
-              className="py-2.5 px-3 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/40 text-blue-800 dark:text-blue-300 border border-blue-200 dark:border-blue-800/60 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
-            >
-              <Database className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
-              <span>Full JSON Database</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleExportCSV('products')}
-              className="py-2.5 px-3 bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-              <span>Products Excel CSV</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleExportCSV('sales')}
-              className="py-2 px-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-            >
-              <FileText className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-              <span>Sales Ledger CSV</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleExportCSV('contacts')}
-              className="py-2 px-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-            >
-              <User className="w-3.5 h-3.5 text-purple-500 shrink-0" />
-              <span>Khata Contacts CSV</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Cloud Backup Snapshots */}
-        <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
-              <Cloud className="w-3.5 h-3.5 text-blue-500" />
-              2. Firebase Cloud Snapshots:
-            </span>
-            {currentUser && (
-              <button
-                type="button"
-                onClick={() => {
-                  setShowCloudSnapshots(true);
-                  handleLoadCloudSnapshots();
-                }}
-                className="text-[10px] text-blue-600 dark:text-blue-400 font-semibold hover:underline flex items-center gap-1 cursor-pointer"
-              >
-                <History className="w-3 h-3" />
-                <span>View Saved Snapshots</span>
-              </button>
-            )}
-          </div>
-
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={handleSaveCloudSnapshot}
-              disabled={isSavingSnapshot}
-              className="flex-1 py-2.5 px-3 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-slate-950 rounded-xl text-xs font-black shadow-xs flex items-center justify-center gap-1.5 transition-all active:scale-98 disabled:opacity-50 cursor-pointer"
-            >
-              <CloudUpload className="w-4 h-4 text-slate-950" />
-              <span>{isSavingSnapshot ? 'Saving Cloud Snapshot...' : 'Save Cloud Backup to Firebase'}</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Restore Section with Merge vs Replace */}
-        <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-1.5">
-          <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 block">
-            3. Restore Database (Choose Merge or Replace):
-          </span>
-          <label className="w-full py-2.5 px-3 bg-slate-900 dark:bg-slate-800 hover:bg-slate-800 dark:hover:bg-slate-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-xs">
-            <Upload className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Select JSON File to Restore...</span>
-            <input
-              type="file"
-              accept=".json"
-              onChange={handleFileSelectedForRestore}
-              className="hidden"
-            />
-          </label>
-        </div>
-      </div>
 
       {/* 9. SAMPLE DATA & MASTER RESET */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-rose-200 dark:border-rose-950 p-4 shadow-xs space-y-3">
@@ -1326,205 +1129,94 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </div>
 
-      {/* App info */}
-      <div className="text-center text-[10px] text-slate-400 dark:text-slate-600 pt-2 pb-4">
-        {shopName} • Cloud POS v2.2 • Real-time Firebase Sync Active
-      </div>
-
-      {/* ========================================================
-          MODAL: RESTORE CONFIRMATION (MERGE VS REPLACE)
-         ======================================================== */}
-      {restoreModalOpen && restoreDetails && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-3 overflow-y-auto">
-          <div 
-            className="bg-white dark:bg-slate-900 rounded-3xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 animate-in fade-in zoom-in-95 my-auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
-              <div className="flex items-center gap-2 text-slate-900 dark:text-white font-black text-sm">
-                <Database className="w-5 h-5 text-amber-500" />
-                <span>Restore Backup Confirmation</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setRestoreModalOpen(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              >
-                ✕
-              </button>
+      {/* 10. SYSTEM DIAGNOSTICS & SYNC MONITOR */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4 shadow-xs space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center">
+              <Activity className="w-4 h-4" />
             </div>
+            <div>
+              <h3 className="font-bold text-sm text-slate-900 dark:text-white">System Diagnostics & Sync Monitor</h3>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Real-time connection, UID account partition & sync health
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowDiagnostics(!showDiagnostics)}
+            className="py-1 px-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-300 rounded-lg text-xs font-bold cursor-pointer transition-colors"
+          >
+            {showDiagnostics ? 'Hide' : 'Inspect'}
+          </button>
+        </div>
 
-            {/* Backup Info */}
-            <div className="p-3 bg-slate-50 dark:bg-slate-800/80 rounded-2xl border border-slate-200 dark:border-slate-700/60 space-y-2">
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-500 dark:text-slate-400">Store Name:</span>
-                <span className="font-bold text-slate-900 dark:text-white truncate max-w-[160px]">{restoreDetails.shopName}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-500 dark:text-slate-400">Exported At:</span>
-                <span className="font-medium text-slate-700 dark:text-slate-300 text-[11px]">
-                  {new Date(restoreDetails.exportedAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+        {showDiagnostics && (
+          <div className="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700/60 space-y-3 text-xs">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="p-2.5 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800">
+                <span className="text-[10px] text-slate-400 block font-semibold uppercase">Auth State</span>
+                <span className="font-bold text-slate-900 dark:text-white capitalize">
+                  {cloudSync.getDiagnostics().authStatus}
                 </span>
               </div>
-
-              {/* Counts Grid */}
-              <div className="grid grid-cols-2 gap-1.5 pt-2 border-t border-slate-200 dark:border-slate-700/60 text-[11px]">
-                <div className="p-2 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 flex justify-between items-center">
-                  <span className="text-slate-500 dark:text-slate-400">Products:</span>
-                  <span className="font-black text-slate-900 dark:text-white">{restoreDetails.productsCount}</span>
-                </div>
-                <div className="p-2 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 flex justify-between items-center">
-                  <span className="text-slate-500 dark:text-slate-400">Sales/Bills:</span>
-                  <span className="font-black text-slate-900 dark:text-white">{restoreDetails.salesCount}</span>
-                </div>
-                <div className="p-2 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 flex justify-between items-center">
-                  <span className="text-slate-500 dark:text-slate-400">Khata Contacts:</span>
-                  <span className="font-black text-slate-900 dark:text-white">{restoreDetails.contactsCount}</span>
-                </div>
-                <div className="p-2 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 flex justify-between items-center">
-                  <span className="text-slate-500 dark:text-slate-400">Karigars:</span>
-                  <span className="font-black text-slate-900 dark:text-white">{restoreDetails.professionalsCount}</span>
-                </div>
+              <div className="p-2.5 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800">
+                <span className="text-[10px] text-slate-400 block font-semibold uppercase">Account Partition</span>
+                <span className="font-bold text-slate-900 dark:text-white font-mono text-[11px]">
+                  {cloudSync.getDiagnostics().userIdMasked || 'Guest (Local)'}
+                </span>
+              </div>
+              <div className="p-2.5 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800">
+                <span className="text-[10px] text-slate-400 block font-semibold uppercase">Sync Status</span>
+                <span className="font-bold text-slate-900 dark:text-white capitalize flex items-center gap-1.5">
+                  <span className={`w-2 h-2 rounded-full ${cloudSync.getDiagnostics().syncStatus === 'synced' ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                  {cloudSync.getDiagnostics().syncStatus}
+                </span>
+              </div>
+              <div className="p-2.5 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800">
+                <span className="text-[10px] text-slate-400 block font-semibold uppercase">Write Queue</span>
+                <span className="font-bold text-slate-900 dark:text-white tabular-nums">
+                  {cloudSync.getDiagnostics().pendingWritesCount} pending
+                </span>
               </div>
             </div>
 
-            {/* Restore Modality Explanation & Buttons */}
-            <div className="space-y-2 pt-1">
-              <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block text-center">
-                How would you like to restore this data?
-              </span>
-
-              {/* Option 1: Merge */}
-              <button
-                type="button"
-                onClick={() => handleExecuteRestore('merge')}
-                className="w-full p-3 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-slate-950 rounded-2xl text-left shadow-xs transition-all active:scale-98 cursor-pointer group"
-              >
-                <div className="font-black text-xs flex items-center justify-between">
-                  <span>Merge with Existing Data (Recommended)</span>
-                  <span className="text-[10px] bg-slate-950 text-white px-2 py-0.5 rounded-full">Safe</span>
-                </div>
-                <p className="text-[10px] text-slate-900/80 mt-0.5 leading-snug">
-                  Combines backup records with current data. Retains all sales made today and updates existing stock.
-                </p>
-              </button>
-
-              {/* Option 2: Clean Replace */}
-              <button
-                type="button"
-                onClick={() => handleExecuteRestore('replace')}
-                className="w-full p-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-2xl text-left transition-all active:scale-98 cursor-pointer"
-              >
-                <div className="font-bold text-xs flex items-center justify-between text-rose-600 dark:text-rose-400">
-                  <span>Clean Full Replace</span>
-                  <span className="text-[10px] bg-rose-100 dark:bg-rose-950/60 px-2 py-0.5 rounded-full font-bold">Overwrite</span>
-                </div>
-                <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
-                  Wipes current local records and restores the exact point-in-time snapshot from the file.
-                </p>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setRestoreModalOpen(false)}
-                className="w-full py-2.5 text-center text-xs font-bold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
+            <div className="p-2.5 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 space-y-1">
+              <div className="flex justify-between text-[11px]">
+                <span className="text-slate-500 dark:text-slate-400">Owner Email:</span>
+                <span className="font-medium text-slate-800 dark:text-slate-200">{cloudSync.getDiagnostics().userEmailMasked || 'None (Guest Mode)'}</span>
+              </div>
+              <div className="flex justify-between text-[11px]">
+                <span className="text-slate-500 dark:text-slate-400">Last Synced:</span>
+                <span className="font-medium text-slate-800 dark:text-slate-200">
+                  {cloudSync.getDiagnostics().lastSuccessfulSync
+                    ? new Date(cloudSync.getDiagnostics().lastSuccessfulSync!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                    : 'Awaiting sync'}
+                </span>
+              </div>
+              <div className="flex justify-between text-[11px]">
+                <span className="text-slate-500 dark:text-slate-400">Verified Sample Items:</span>
+                <span className="font-black text-amber-600 dark:text-amber-400">{cloudSync.getDiagnostics().sampleRecordsCount} records</span>
+              </div>
             </div>
+
+            <button
+              type="button"
+              onClick={handleCopyDiagnostics}
+              className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition-colors"
+            >
+              {copiedDiag ? <CheckCheck className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-slate-400" />}
+              <span>{copiedDiag ? 'Copied to Clipboard!' : 'Copy Sanitized Diagnostic Report'}</span>
+            </button>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* ========================================================
-          MODAL: VIEW CLOUD BACKUP SNAPSHOTS
-         ======================================================== */}
-      {showCloudSnapshots && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-3 overflow-y-auto">
-          <div 
-            className="bg-white dark:bg-slate-900 rounded-3xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 animate-in fade-in zoom-in-95 my-auto max-h-[88vh] overflow-y-auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
-              <div className="flex items-center gap-2 text-slate-900 dark:text-white font-black text-sm">
-                <Cloud className="w-5 h-5 text-blue-500" />
-                <span>Firebase Cloud Snapshots</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowCloudSnapshots(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            {loadingSnapshots ? (
-              <div className="py-8 text-center text-xs text-slate-500 flex flex-col items-center gap-2">
-                <RefreshCw className="w-5 h-5 animate-spin text-amber-500" />
-                <span>Loading cloud snapshots...</span>
-              </div>
-            ) : cloudSnapshots.length === 0 ? (
-              <div className="py-8 text-center text-xs text-slate-400 dark:text-slate-500 space-y-1">
-                <p>No cloud backup snapshots found yet.</p>
-                <p className="text-[11px] text-slate-400">Tap "Save Cloud Backup to Firebase" to create your first snapshot.</p>
-              </div>
-            ) : (
-              <div className="space-y-2.5 max-h-[50vh] overflow-y-auto">
-                {cloudSnapshots.map((snap) => (
-                  <div 
-                    key={snap.id}
-                    className="p-3 bg-slate-50 dark:bg-slate-800/80 rounded-2xl border border-slate-200 dark:border-slate-700/60 space-y-2"
-                  >
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <div className="font-bold text-xs text-slate-900 dark:text-white leading-tight">{snap.label}</div>
-                        <div className="text-[10px] text-slate-500 dark:text-slate-400">
-                          {new Date(snap.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                        </div>
-                      </div>
-                      <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-full">
-                        Cloud Verified
-                      </span>
-                    </div>
-
-                    <div className="flex gap-2 text-[10px] text-slate-600 dark:text-slate-400">
-                      <span>Products: {snap.stats?.productsCount || 0}</span>
-                      <span>•</span>
-                      <span>Sales: {snap.stats?.salesCount || 0}</span>
-                      <span>•</span>
-                      <span>Contacts: {snap.stats?.contactsCount || 0}</span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-1.5 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setRestoreCloudId(snap.id);
-                          handleExecuteRestore('merge');
-                        }}
-                        className="py-1.5 px-2 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-xl text-xs font-bold transition-all active:scale-98 cursor-pointer"
-                      >
-                        Merge
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setRestoreCloudId(snap.id);
-                          handleExecuteRestore('replace');
-                        }}
-                        className="py-1.5 px-2 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-900 dark:text-white rounded-xl text-xs font-bold transition-all active:scale-98 cursor-pointer"
-                      >
-                        Replace
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      {/* App info */}
+      <div className="text-center text-[10px] text-slate-400 dark:text-slate-600 pt-2 pb-4">
+        {shopName} • Cloud POS v3.0 • Multi-Device Real-Time Sync Active
+      </div>
     </div>
   );
 };

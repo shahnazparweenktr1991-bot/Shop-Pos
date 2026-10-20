@@ -22,6 +22,7 @@ export interface Category {
   imageUrl?: string;
   subcategories?: Subcategory[];
   isSample?: boolean;
+  recordOrigin?: 'sample' | 'user' | 'imported';
   createdAt: string;
 }
 
@@ -49,6 +50,7 @@ export interface Product {
   supplierName?: string;
   notes?: string;
   isSample?: boolean;
+  recordOrigin?: 'sample' | 'user' | 'imported';
   createdAt: string;
   updatedAt: string;
 }
@@ -104,6 +106,7 @@ export interface Sale {
   notes?: string;
   stockDeducted: boolean; // True only if stock has been subtracted exactly once
   isSample?: boolean;
+  recordOrigin?: 'sample' | 'user' | 'imported';
   createdAt: string;
 }
 
@@ -125,6 +128,7 @@ export interface Purchase {
   remainingBalance: number;
   notes?: string;
   isSample?: boolean;
+  recordOrigin?: 'sample' | 'user' | 'imported';
   createdAt: string;
 }
 
@@ -153,6 +157,7 @@ export interface Contact {
   creditBalance: number; // Positive = Customer owes shop. Negative = Shop owes supplier.
   notes?: string;
   isSample?: boolean;
+  recordOrigin?: 'sample' | 'user' | 'imported';
   createdAt: string;
 }
 
@@ -169,6 +174,7 @@ export interface Payment {
   saleId?: string;
   notes?: string;
   isSample?: boolean;
+  recordOrigin?: 'sample' | 'user' | 'imported';
   createdAt: string;
 }
 
@@ -179,6 +185,7 @@ export interface Expense {
   amount: number;
   notes?: string;
   isSample?: boolean;
+  recordOrigin?: 'sample' | 'user' | 'imported';
   createdAt: string;
 }
 
@@ -218,6 +225,7 @@ export interface MaterialEstimate {
   totalEstimatedCost: number;
   notes?: string;
   isSample?: boolean;
+  recordOrigin?: 'sample' | 'user' | 'imported';
   createdAt: string;
 }
 
@@ -237,5 +245,31 @@ export interface Professional {
   bio?: string;
   isAvailable: boolean;
   isSample?: boolean;
+  recordOrigin?: 'sample' | 'user' | 'imported';
   createdAt: string;
+}
+
+export interface SyncDiagnosticInfo {
+  authStatus: 'initializing' | 'signedOut' | 'loadingAccount' | 'ready' | 'error';
+  userIdMasked: string | null;
+  userEmailMasked: string | null;
+  syncStatus: 'idle' | 'syncing' | 'synced' | 'error' | 'offline';
+  isOnline: boolean;
+  initialHydrationComplete: boolean;
+  lastSuccessfulSync: string | null;
+  pendingWritesCount: number;
+  collectionCounts: {
+    products: number;
+    sales: number;
+    contacts: number;
+    professionals: number;
+    purchases: number;
+    payments: number;
+    expenses: number;
+    estimates: number;
+  };
+  sampleRecordsCount: number;
+  lastError: string | null;
+  appVersion: string;
+  schemaVersion: number;
 }

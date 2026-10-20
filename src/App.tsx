@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { ShopStorage } from './utils/storage';
-import { cloudSync } from './utils/cloudSync';
+import { cloudSync, AuthState } from './utils/cloudSync';
 import { 
   Product, 
   Category, 
@@ -30,11 +30,16 @@ import { SettingsView } from './components/SettingsView';
 import { InvoiceModal } from './components/InvoiceModal';
 import { ResetModal } from './components/ResetModal';
 import { InstallModal } from './components/InstallModal';
-import { Trash2, AlertCircle, CheckCircle, X } from 'lucide-react';
+import { Trash2, AlertCircle, CheckCircle, X, ArrowDownToLine, Database } from 'lucide-react';
 import { sounds } from './utils/sound';
 import { voiceAssistant } from './utils/voiceAssistant';
 
 export default function App() {
+  // Authentication & Hydration State
+  const [authStatus, setAuthStatus] = useState<AuthState>(cloudSync.getAuthStatus());
+  const [isLegacyPromptOpen, setIsLegacyPromptOpen] = useState(false);
+  const [clearingSample, setClearingSample] = useState(false);
+
   // Navigation & View state
   const [currentTab, setCurrentTab] = useState<NavTab>('dashboard');
   const [billingInitialMode, setBillingInitialMode] = useState<'itemised' | 'amount_only'>('itemised');
@@ -175,19 +180,34 @@ export default function App() {
     }
   }, []);
 
-  // Initialize on mount
+  // Initialize on mount & subscribe to authoritative Auth State Machine
   useEffect(() => {
     ShopStorage.init();
     refreshAllState();
+
+    // Subscribe to Firebase Auth state transitions
+    const unsubAuth = cloudSync.subscribeAuth((user, status) => {
+      setAuthStatus(status);
+      refreshAllState();
+
+      if (status === 'ready' && user) {
+        // If un-migrated legacy local data exists on this phone, prompt the owner explicitly
+        const hasLegacy = ShopStorage.hasLegacyUnscopedData();
+        const alreadyMigrated = localStorage.getItem('ak_legacy_migrated_v2');
+        if (hasLegacy && !alreadyMigrated) {
+          setIsLegacyPromptOpen(true);
+        }
+      }
+    });
 
     // Register live Firestore updates listener
     cloudSync.registerDataUpdateListener(() => {
       refreshAllState();
     });
 
-    if (cloudSync.isLoggedIn()) {
-      cloudSync.pushToCloud().catch(() => {});
-    }
+    return () => {
+      unsubAuth();
+    };
   }, [refreshAllState]);
 
   // Capture PWA beforeinstallprompt event for phone installation
@@ -317,16 +337,37 @@ export default function App() {
     refreshAllState();
   };
 
-  // Demo Data management
+  // Safe Demo Data Management (Provenance-Based)
   const handleClearDemoData = () => {
     setIsClearDemoModalOpen(true);
   };
 
-  const handleConfirmClearDemo = () => {
-    ShopStorage.clearDemoData();
+  const handleConfirmClearDemo = async () => {
+    setClearingSample(true);
+    try {
+      const res = ShopStorage.clearDemoData();
+      await cloudSync.clearCloudSampleData(res.sampleDocIds);
+      refreshAllState();
+      setIsClearDemoModalOpen(false);
+      setToastMessage(`Cleared ${res.clearedTotal} sample records! Real shop data preserved.`);
+      sounds.playPaymentSuccess();
+    } catch (err: any) {
+      setToastMessage('Error clearing sample records: ' + (err?.message || 'Try again'));
+    } finally {
+      setClearingSample(false);
+    }
+  };
+
+  const handleMigrateLegacy = (mode: 'import' | 'dismiss') => {
+    const res = ShopStorage.migrateLegacyDataToActiveAccount(mode);
     refreshAllState();
-    setIsClearDemoModalOpen(false);
-    setToastMessage('All demo records cleared! Real records are preserved.');
+    setIsLegacyPromptOpen(false);
+    if (mode === 'import') {
+      setToastMessage(`Imported ${res.importedCount} local records into your account!`);
+      sounds.playPaymentSuccess();
+    } else {
+      setToastMessage('Kept authoritative cloud database intact.');
+    }
   };
 
   const handleLoadDemoData = () => {
@@ -347,6 +388,26 @@ export default function App() {
   };
 
   const lowStockCount = products.filter(p => p.currentStock <= p.minStock).length;
+
+  if (authStatus === 'initializing') {
+    return (
+      <div className={`min-h-screen ${darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'} flex flex-col items-center justify-center p-6 text-center select-none`}>
+        <div className="w-16 h-16 rounded-3xl bg-amber-500 text-slate-950 flex items-center justify-center font-black text-2xl shadow-xl shadow-amber-500/20 mb-4 animate-bounce">
+          AK
+        </div>
+        <h1 className="text-xl font-black tracking-tight text-slate-900 dark:text-white">A.K. Hardware & Tools</h1>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-xs leading-relaxed">
+          Verifying credentials and connecting shop database...
+        </p>
+        <div className="mt-6 flex items-center gap-2 text-xs font-semibold text-amber-600 dark:text-amber-400">
+          <div className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+          <span>Connecting to cloud storage...</span>
+        </div>
+      </div>
+    );
+  }
+
+  const sampleCounts = ShopStorage.getSampleCounts();
 
   return (
     <div className={`min-h-screen ${darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-100 text-slate-900'} flex flex-col font-sans antialiased selection:bg-amber-400 selection:text-slate-950 transition-colors duration-150`}>
@@ -500,38 +561,137 @@ export default function App() {
         </div>
       )}
 
-      {/* Clear Demo Records In-App Modal */}
+      {/* Safe Clear Sample Records Modal (Provenance-Based) */}
       {isClearDemoModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white dark:bg-slate-900 rounded-3xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 animate-in fade-in zoom-in-95">
-            <div className="w-12 h-12 rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 flex items-center justify-center mx-auto">
-              <Trash2 className="w-6 h-6 text-amber-600 dark:text-amber-400" />
+            {sampleCounts.total === 0 ? (
+              <>
+                <div className="w-12 h-12 rounded-2xl bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 flex items-center justify-center mx-auto">
+                  <CheckCircle className="w-6 h-6 text-emerald-600 dark:text-emerald-400" />
+                </div>
+                <div className="text-center space-y-1.5">
+                  <h3 className="font-bold text-base text-slate-900 dark:text-white">No Sample Data to Clear</h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                    All existing records belong to your genuine shop inventory, bills, and customers. No demonstration records exist in your database.
+                  </p>
+                </div>
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsClearDemoModalOpen(false)}
+                    className="w-full py-2.5 px-4 bg-slate-900 dark:bg-slate-800 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    Got It (Keep Records Safe)
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="w-12 h-12 rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 flex items-center justify-center mx-auto">
+                  <Trash2 className="w-6 h-6 text-amber-600 dark:text-amber-400" />
+                </div>
+
+                <div className="text-center space-y-1">
+                  <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                    Clear {sampleCounts.total} Sample Records?
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                    This will remove only positively identified demo records so you can start clean:
+                  </p>
+                </div>
+
+                {/* Itemized breakdown by type */}
+                <div className="p-3 bg-slate-50 dark:bg-slate-800/80 rounded-2xl border border-slate-200 dark:border-slate-700/60 space-y-1 text-xs">
+                  {sampleCounts.products > 0 && (
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-slate-600 dark:text-slate-300">Demo Products:</span>
+                      <span className="font-bold text-slate-900 dark:text-white">{sampleCounts.products} items</span>
+                    </div>
+                  )}
+                  {sampleCounts.sales > 0 && (
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-slate-600 dark:text-slate-300">Demo Invoices:</span>
+                      <span className="font-bold text-slate-900 dark:text-white">{sampleCounts.sales} bills</span>
+                    </div>
+                  )}
+                  {sampleCounts.contacts > 0 && (
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-slate-600 dark:text-slate-300">Demo Customers/Suppliers:</span>
+                      <span className="font-bold text-slate-900 dark:text-white">{sampleCounts.contacts} contacts</span>
+                    </div>
+                  )}
+                  {sampleCounts.purchases > 0 && (
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-slate-600 dark:text-slate-300">Demo Purchases:</span>
+                      <span className="font-bold text-slate-900 dark:text-white">{sampleCounts.purchases} records</span>
+                    </div>
+                  )}
+                  {sampleCounts.professionals > 0 && (
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-slate-600 dark:text-slate-300">Demo Directory Craftsmen:</span>
+                      <span className="font-bold text-slate-900 dark:text-white">{sampleCounts.professionals} contacts</span>
+                    </div>
+                  )}
+                </div>
+
+                <p className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold text-center">
+                  All real products, genuine customer debts, and actual bills you entered are 100% safe.
+                </p>
+
+                <div className="grid grid-cols-2 gap-2 pt-2">
+                  <button
+                    type="button"
+                    disabled={clearingSample}
+                    onClick={() => setIsClearDemoModalOpen(false)}
+                    className="py-2.5 px-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    Keep Demo
+                  </button>
+                  <button
+                    type="button"
+                    disabled={clearingSample}
+                    onClick={handleConfirmClearDemo}
+                    className="py-2.5 px-3 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-slate-950 rounded-xl text-xs font-black shadow-md transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {clearingSample ? 'Clearing...' : `Delete ${sampleCounts.total} Samples`}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Explicit Legacy Local Data Migration Modal */}
+      {isLegacyPromptOpen && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 rounded-3xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 animate-in fade-in zoom-in-95">
+            <div className="w-12 h-12 rounded-2xl bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-400 flex items-center justify-center mx-auto">
+              <ArrowDownToLine className="w-6 h-6 text-blue-600 dark:text-blue-400" />
             </div>
 
             <div className="text-center space-y-1">
-              <h3 className="font-bold text-base text-slate-900 dark:text-white">Clear Sample Records?</h3>
+              <h3 className="font-bold text-base text-slate-900 dark:text-white">Local Records Found</h3>
               <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                This will remove demo products, demo bills, and sample contacts so you can start with a fresh shop database for <strong>{localStorage.getItem('ak_shop_name') || 'your store'}</strong>.
-              </p>
-              <p className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold pt-1">
-                Any real products or contacts you entered will stay safe.
+                We detected previously saved products or customer records on this phone. Would you like to import them into your authenticated shop account?
               </p>
             </div>
 
             <div className="grid grid-cols-2 gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setIsClearDemoModalOpen(false)}
+                onClick={() => handleMigrateLegacy('dismiss')}
                 className="py-2.5 px-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-bold transition-colors cursor-pointer"
               >
-                Keep Demo
+                Start Fresh
               </button>
               <button
                 type="button"
-                onClick={handleConfirmClearDemo}
-                className="py-2.5 px-3 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-slate-950 rounded-xl text-xs font-black shadow-md transition-colors cursor-pointer"
+                onClick={() => handleMigrateLegacy('import')}
+                className="py-2.5 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-black shadow-md transition-colors cursor-pointer"
               >
-                Yes, Clear All
+                Import to Account
               </button>
             </div>
           </div>
