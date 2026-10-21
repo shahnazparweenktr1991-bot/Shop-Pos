@@ -16,7 +16,8 @@ import {
   Clock, 
   Receipt, 
   FileText,
-  Share2
+  Share2,
+  AlertTriangle
 } from 'lucide-react';
 import { Contact, ContactProfession, Payment, PaymentMethod, Sale, Purchase } from '../types';
 import { formatCurrency, formatDateTime, formatWhatsAppNumber, PROFESSION_LABELS } from '../utils/formatters';
@@ -64,6 +65,7 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
   const [formProfession, setFormProfession] = useState<string>('customer');
   const [formLocation, setFormLocation] = useState('');
   const [formCreditBalance, setFormCreditBalance] = useState('0');
+  const [formCreditLimit, setFormCreditLimit] = useState('');
   const [formNotes, setFormNotes] = useState('');
 
   // Filtered contacts
@@ -100,6 +102,7 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
     setFormProfession('customer');
     setFormLocation('');
     setFormCreditBalance('0');
+    setFormCreditLimit('');
     setFormNotes('');
     setIsContactModalOpen(true);
   };
@@ -111,6 +114,7 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
     setFormProfession(c.profession);
     setFormLocation(c.location);
     setFormCreditBalance(c.creditBalance.toString());
+    setFormCreditLimit(c.creditLimit !== undefined ? c.creditLimit.toString() : '');
     setFormNotes(c.notes || '');
     setIsContactModalOpen(true);
   };
@@ -119,6 +123,8 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
     e.preventDefault();
     if (!formName.trim()) return;
 
+    const parsedLimit = formCreditLimit.trim() ? parseFloat(formCreditLimit) : undefined;
+
     const newContact: Contact = {
       id: editingContact ? editingContact.id : `cnt-${Date.now()}`,
       name: formName.trim(),
@@ -126,6 +132,7 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
       profession: formProfession.trim() || 'customer',
       location: formLocation.trim(),
       creditBalance: parseFloat(formCreditBalance) || 0,
+      creditLimit: parsedLimit !== undefined && !isNaN(parsedLimit) ? parsedLimit : undefined,
       notes: formNotes.trim() || undefined,
       isSample: editingContact ? editingContact.isSample : false,
       createdAt: editingContact ? editingContact.createdAt : new Date().toISOString()
@@ -370,9 +377,17 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
                   {/* Credit / Balance Display */}
                   <div className="text-right">
                     {hasCredit ? (
-                      <div className="bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 px-2 py-0.5 rounded-lg text-right">
-                        <span className="text-[9px] text-rose-600 dark:text-rose-400 font-bold uppercase block">Udhar (Due)</span>
-                        <span className="text-xs font-black text-rose-700 dark:text-rose-300">{formatCurrency(contact.creditBalance)}</span>
+                      <div className="text-right space-y-1">
+                        <div className="bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 px-2 py-0.5 rounded-lg text-right">
+                          <span className="text-[9px] text-rose-600 dark:text-rose-400 font-bold uppercase block">Udhar (Due)</span>
+                          <span className="text-xs font-black text-rose-700 dark:text-rose-300">{formatCurrency(contact.creditBalance)}</span>
+                        </div>
+                        {contact.creditLimit !== undefined && contact.creditBalance > contact.creditLimit && (
+                          <div className="flex items-center justify-end gap-1 bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-700 px-1.5 py-0.5 rounded-md text-[9px] font-bold">
+                            <AlertTriangle className="w-2.5 h-2.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                            <span>Limit Exceeded (₹{contact.creditLimit})</span>
+                          </div>
+                        )}
                       </div>
                     ) : hasSupplierDebt ? (
                       <div className="bg-purple-50 dark:bg-purple-950/50 border border-purple-200 dark:border-purple-900 px-2 py-0.5 rounded-lg text-right">
@@ -575,19 +590,38 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
                 />
               </div>
 
-              <div>
-                <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">Opening Credit Balance (₹)</label>
-                <input
-                  type="number"
-                  step="any"
-                  value={formCreditBalance}
-                  onChange={(e) => setFormCreditBalance(e.target.value)}
-                  placeholder="0 (+ if customer owes you, - if you owe supplier)"
-                  className="w-full p-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white rounded-xl font-medium focus:bg-white dark:focus:bg-slate-800"
-                />
-                <span className="text-[10px] text-slate-400 dark:text-slate-500 block mt-0.5">
-                  Positive = customer owes shop; Negative = shop owes supplier.
-                </span>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">Opening Credit Balance (₹)</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={formCreditBalance}
+                    onChange={(e) => setFormCreditBalance(e.target.value)}
+                    placeholder="0 (+ customer owes, - supplier owes)"
+                    className="w-full p-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white rounded-xl font-medium focus:bg-white dark:focus:bg-slate-800 text-xs"
+                  />
+                  <span className="text-[10px] text-slate-400 dark:text-slate-500 block mt-0.5">
+                    Positive = customer owes shop
+                  </span>
+                </div>
+
+                <div>
+                  <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                    Credit Limit (₹) <span className="text-[10px] text-slate-400 font-normal">(optional)</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={formCreditLimit}
+                    onChange={(e) => setFormCreditLimit(e.target.value)}
+                    placeholder="e.g. 5000"
+                    className="w-full p-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white rounded-xl font-medium focus:bg-white dark:focus:bg-slate-800 text-xs"
+                  />
+                  <span className="text-[10px] text-amber-600 dark:text-amber-400 block mt-0.5">
+                    Warns when credit exceeds limit
+                  </span>
+                </div>
               </div>
 
               <div>

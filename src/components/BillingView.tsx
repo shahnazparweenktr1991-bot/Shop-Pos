@@ -24,6 +24,7 @@ import { Product, Sale, SaleItem, Contact, PaymentMethod } from '../types';
 import { formatCurrency, formatDateTime } from '../utils/formatters';
 import { sounds } from '../utils/sound';
 import { voiceAssistant, VoiceLanguage } from '../utils/voiceAssistant';
+import { ShopStorage } from '../utils/storage';
 
 interface BillingViewProps {
   products: Product[];
@@ -275,6 +276,23 @@ export const BillingView: React.FC<BillingViewProps> = ({
       return;
     }
 
+    // Decision 5: Strictly block bill creation if any product in cart has zero or insufficient stock
+    for (const item of cartItems) {
+      const prod = products.find(p => p.id === item.productId);
+      if (prod) {
+        if (prod.currentStock <= 0) {
+          setErrorMsg(`Cannot complete sale: "${prod.name}" is out of stock (Stock: 0 ${prod.unit}). Please restock before billing.`);
+          sounds.playWarning();
+          return;
+        }
+        if (item.quantity > prod.currentStock) {
+          setErrorMsg(`Insufficient stock for "${prod.name}": Available ${prod.currentStock} ${prod.unit}, requested ${item.quantity}.`);
+          sounds.playWarning();
+          return;
+        }
+      }
+    }
+
     // Require customer for credit/udhar billing so their balance is accurately tracked
     if ((paymentMethod === 'credit' || remainingBalance > 0) && !selectedCustomerId && !customCustomerName.trim()) {
       setErrorMsg('⚠️ For Udhar (Credit) billing, please select a contact or enter the customer name so their Khata balance is credited.');
@@ -282,7 +300,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
       return;
     }
 
-    const billNumber = `INV-${Date.now().toString().slice(-6)}`;
+    const billNumber = ShopStorage.generateNextBillNumber();
     const saleId = `sale-${Date.now()}`;
 
     const effectiveCustomerName = customerDisplayName || 'Walk-in Customer';
@@ -371,7 +389,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
     const newSale: Sale = {
       id: `sale-qs-${Date.now()}`,
-      billNumber: `QS-${Date.now().toString().slice(-6)}`,
+      billNumber: ShopStorage.generateNextBillNumber('QS'),
       date: new Date().toISOString(),
       type: 'amount_only',
       status: 'finalised',
@@ -766,6 +784,19 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     ))}
                   </select>
                 </div>
+
+                {selectedCustomerId && (() => {
+                  const sel = contacts.find(c => c.id === selectedCustomerId);
+                  if (sel && sel.creditLimit && sel.creditBalance > sel.creditLimit) {
+                    return (
+                      <div className="p-2 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-semibold flex items-center gap-1.5">
+                        <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                        <span>⚠️ Credit Limit Exceeded! Current due: {formatCurrency(sel.creditBalance)} (Limit: {formatCurrency(sel.creditLimit)})</span>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
 
                 {!selectedCustomerId && (
                   <div className="grid grid-cols-2 gap-2">

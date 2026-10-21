@@ -9,7 +9,8 @@ import {
   Copy, 
   Check, 
   AlertTriangle,
-  MessageCircle
+  MessageCircle,
+  QrCode
 } from 'lucide-react';
 import { Sale } from '../types';
 import { formatCurrency, formatDateTime, formatWhatsAppNumber } from '../utils/formatters';
@@ -317,6 +318,23 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({
               </div>
             )}
           </div>
+
+          {/* Dynamic UPI Payment QR Code (Decision 9) */}
+          {shopUpi && (
+            <div className="my-3 p-3 bg-slate-50 dark:bg-slate-800/60 rounded-2xl border border-slate-200 dark:border-slate-700/80 flex flex-col items-center justify-center text-center print:bg-white print:border-slate-300">
+              <div className="text-[11px] font-bold text-slate-800 dark:text-slate-200 print:text-black mb-1 flex items-center gap-1.5">
+                <QrCode className="w-3.5 h-3.5 text-amber-500" />
+                <span>Scan to Pay via UPI ({formatCurrency(sale.remainingBalance > 0 ? sale.remainingBalance : sale.totalAmount)})</span>
+              </div>
+              <img 
+                src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(`upi://pay?pa=${shopUpi}&pn=${encodeURIComponent(shopName)}&am=${sale.remainingBalance > 0 ? sale.remainingBalance : sale.totalAmount}&cu=INR`)}&margin=6`} 
+                alt="UPI Payment QR Code"
+                className="w-28 h-28 rounded-xl bg-white p-1.5 shadow-xs border border-slate-200 print:w-24 print:h-24"
+                referrerPolicy="no-referrer"
+              />
+              <span className="text-[10px] text-slate-500 dark:text-slate-400 print:text-slate-600 mt-1 font-mono font-medium">UPI: {shopUpi}</span>
+            </div>
+          )}
 
           {/* Notes */}
           {sale.notes && sale.type === 'itemised' && (

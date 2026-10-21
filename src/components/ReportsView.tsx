@@ -77,45 +77,67 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   const itemisedSalesCount = filteredSales.filter(s => s.type === 'itemised').length;
   const amountOnlySalesCount = filteredSales.filter(s => s.type === 'amount_only').length;
 
-  // COGS: only computable on itemised sales items where historical purchasePrice is preserved
-  const costOfGoodsSold = useMemo(() => {
+  // Decision 15: COGS & Profit analysis
+  // If wholesale purchase cost is zero or unrecorded, mark profit as "Unavailable" rather than fabricating misleading 100% margins
+  const cogsData = useMemo(() => {
     let totalCost = 0;
+    let costRecordedItemCount = 0;
+
     for (const sale of filteredSales) {
-      if (sale.type === 'itemised' && sale.items) {
+      if (sale.type === 'itemised' && sale.items && sale.items.length > 0) {
         for (const item of sale.items) {
-          totalCost += (item.purchasePrice || 0) * (item.quantity || 0);
+          if (item.purchasePrice !== undefined && item.purchasePrice > 0) {
+            totalCost += item.purchasePrice * (item.quantity || 0);
+            costRecordedItemCount++;
+          }
         }
       }
     }
-    return totalCost;
+
+    const hasRecordedCost = costRecordedItemCount > 0;
+    return {
+      totalCost,
+      hasRecordedCost,
+      costRecordedItemCount,
+    };
   }, [filteredSales]);
 
-  const grossProfit = Math.max(0, totalRevenue - costOfGoodsSold);
+  // When sales exist but wholesale cost is unknown or zero, mark profit as Unavailable per Decision 15
+  const isCostRecorded = cogsData.hasRecordedCost;
+  const costOfGoodsSold = isCostRecorded ? cogsData.totalCost : null;
+  const grossProfit = isCostRecorded ? Math.max(0, totalRevenue - cogsData.totalCost) : null;
   const totalExpenses = filteredExpenses.reduce((acc, e) => acc + e.amount, 0);
-  const netProfit = grossProfit - totalExpenses;
-  const grossMarginPct = totalRevenue > 0 ? Math.round((grossProfit / totalRevenue) * 100) : 0;
+  const netProfit = grossProfit !== null ? grossProfit - totalExpenses : null;
+  const grossMarginPct = (grossProfit !== null && totalRevenue > 0) ? Math.round((grossProfit / totalRevenue) * 100) : null;
 
   // Low stock products
   const lowStockProducts = products.filter(p => p.currentStock <= p.minStock);
 
   // Submit Expense
+  const [customCategoryName, setCustomCategoryName] = useState('');
+
   const handleSaveExpense = (e: React.FormEvent) => {
     e.preventDefault();
     const amt = parseFloat(expenseAmount);
     if (isNaN(amt) || amt <= 0) return;
+
+    const effectiveNotes = customCategoryName.trim()
+      ? `[${customCategoryName.trim()}] ${expenseNotes.trim()}`.trim()
+      : expenseNotes.trim() || undefined;
 
     const newExp: Expense = {
       id: `exp-${Date.now()}`,
       date: new Date().toISOString(),
       category: expenseCategory,
       amount: amt,
-      notes: expenseNotes.trim() || undefined,
+      notes: effectiveNotes,
       createdAt: new Date().toISOString()
     };
 
     onAddExpense(newExp);
     setExpenseAmount('');
     setExpenseNotes('');
+    setCustomCategoryName('');
     setIsExpenseModalOpen(false);
   };
 
@@ -123,7 +145,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     <div className="pb-28 pt-2 px-3 max-w-lg mx-auto space-y-3.5">
       
       {/* Timeframe Selector Pills */}
-      <div className="flex gap-1 overflow-x-auto p-1 bg-slate-100 rounded-xl text-xs font-bold scrollbar-none">
+      <div className="flex gap-1 overflow-x-auto p-1 bg-slate-100 dark:bg-slate-800 rounded-xl text-xs font-bold scrollbar-none">
         {[
           { id: 'today', label: 'Today' },
           { id: 'yesterday', label: 'Yesterday' },
@@ -134,10 +156,10 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           <button
             key={t.id}
             onClick={() => setTimeframe(t.id as any)}
-            className={`flex-1 py-1.5 px-2 rounded-lg transition-all text-center whitespace-nowrap ${
+            className={`flex-1 py-1.5 px-2 rounded-lg transition-all text-center whitespace-nowrap cursor-pointer ${
               timeframe === t.id
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-500 hover:text-slate-900'
+                ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
             }`}
           >
             {t.label}
@@ -159,15 +181,24 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider block">
                 Net Profit
               </span>
-              <span className={`text-2xl font-black tracking-tight ${
-                netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'
-              }`}>
-                {formatCurrency(netProfit)}
-              </span>
+              {netProfit !== null ? (
+                <span className={`text-2xl font-black tracking-tight ${
+                  netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                }`}>
+                  {formatCurrency(netProfit)}
+                </span>
+              ) : (
+                <div className="mt-0.5">
+                  <span className="text-xl font-black text-amber-400">Unavailable</span>
+                  <span className="text-[10px] text-slate-400 block">Wholesale purchase cost not recorded</span>
+                </div>
+              )}
             </div>
             <div className="text-right">
               <span className="text-[10px] text-slate-400 uppercase font-bold block">Gross Margin</span>
-              <span className="text-lg font-black text-amber-400">{grossMarginPct}%</span>
+              <span className="text-lg font-black text-amber-400">
+                {grossMarginPct !== null ? `${grossMarginPct}%` : 'Unavailable'}
+              </span>
             </div>
           </div>
         </div>
@@ -184,14 +215,22 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
 
           <div className="p-2.5 bg-slate-800/40 rounded-xl">
             <span className="text-[10px] text-slate-400 uppercase block font-semibold">Cost of Goods (COGS)</span>
-            <span className="text-sm font-black text-rose-300 mt-0.5 block">{formatCurrency(costOfGoodsSold)}</span>
-            <span className="text-[10px] text-slate-400">Inventory cost</span>
+            <span className="text-sm font-black text-rose-300 mt-0.5 block">
+              {costOfGoodsSold !== null ? formatCurrency(costOfGoodsSold) : 'Unavailable'}
+            </span>
+            <span className="text-[10px] text-slate-400">
+              {costOfGoodsSold !== null ? 'Inventory cost' : 'Purchase cost unrecorded'}
+            </span>
           </div>
 
           <div className="p-2.5 bg-slate-800/40 rounded-xl">
             <span className="text-[10px] text-slate-400 uppercase block font-semibold">Gross Profit</span>
-            <span className="text-sm font-black text-emerald-400 mt-0.5 block">{formatCurrency(grossProfit)}</span>
-            <span className="text-[10px] text-slate-400">Revenue minus COGS</span>
+            <span className="text-sm font-black text-emerald-400 mt-0.5 block">
+              {grossProfit !== null ? formatCurrency(grossProfit) : 'Unavailable'}
+            </span>
+            <span className="text-[10px] text-slate-400">
+              {grossProfit !== null ? 'Revenue minus COGS' : 'Cost not recorded'}
+            </span>
           </div>
 
           <div className="p-2.5 bg-slate-800/40 rounded-xl">
@@ -343,8 +382,17 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                   <option value="rent">🏠 Shop Rent</option>
                   <option value="staff">👥 Staff Salary / Wages</option>
                   <option value="maintenance">🔧 Maintenance & Repair</option>
-                  <option value="other">📋 Other Expenses</option>
+                  <option value="other">📋 Other Expenses (Custom)</option>
                 </select>
+                {expenseCategory === 'other' && (
+                  <input
+                    type="text"
+                    value={customCategoryName}
+                    onChange={(e) => setCustomCategoryName(e.target.value)}
+                    placeholder="Enter custom category name (e.g. Packaging, Printing)"
+                    className="mt-2 w-full p-2 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white text-xs"
+                  />
+                )}
               </div>
 
               <div>

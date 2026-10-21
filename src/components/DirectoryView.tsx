@@ -78,29 +78,32 @@ export const DirectoryView: React.FC<DirectoryViewProps> = ({
 
   // Filtered list
   const filteredProfessionals = useMemo(() => {
-    return professionals.filter((prof) => {
-      // Profession filter
-      if (selectedProfession !== 'All') {
-        const p1 = prof.profession.toLowerCase();
-        const p2 = selectedProfession.toLowerCase();
-        if (!p1.includes(p2) && !p2.includes(p1)) {
-          return false;
+    return professionals
+      .filter((prof) => {
+        // Profession filter
+        if (selectedProfession !== 'All') {
+          const p1 = prof.profession.toLowerCase();
+          const p2 = selectedProfession.toLowerCase();
+          if (!p1.includes(p2) && !p2.includes(p1)) {
+            return false;
+          }
         }
-      }
 
-      // Search query
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const matchesName = prof.name.toLowerCase().includes(q);
-        const matchesPhone = prof.phone.includes(q) || (prof.alternatePhone && prof.alternatePhone.includes(q));
-        const matchesAddress = prof.address.toLowerCase().includes(q) || prof.cityArea.toLowerCase().includes(q);
-        const matchesProfession = prof.profession.toLowerCase().includes(q);
-        const matchesSkills = prof.skills?.some(s => s.toLowerCase().includes(q));
-        return matchesName || matchesPhone || matchesAddress || matchesProfession || matchesSkills;
-      }
+        // Search query
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          const matchesName = prof.name.toLowerCase().includes(q);
+          const matchesPhone = prof.phone.includes(q) || (prof.alternatePhone && prof.alternatePhone.includes(q));
+          const matchesAddress = prof.address.toLowerCase().includes(q) || prof.cityArea.toLowerCase().includes(q);
+          const matchesProfession = prof.profession.toLowerCase().includes(q);
+          const matchesSkills = prof.skills?.some(s => s.toLowerCase().includes(q));
+          return matchesName || matchesPhone || matchesAddress || matchesProfession || matchesSkills;
+        }
 
-      return true;
-    });
+        return true;
+      })
+      // Decision 18: Sort Karigars and contractors by ratings (highest first)
+      .sort((a, b) => (b.rating || 0) - (a.rating || 0) || a.name.localeCompare(b.name));
   }, [professionals, selectedProfession, searchQuery]);
 
   const handleOpenAdd = () => {

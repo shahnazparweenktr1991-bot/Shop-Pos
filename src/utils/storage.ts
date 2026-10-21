@@ -25,6 +25,7 @@ import {
   SAMPLE_ESTIMATES,
   SAMPLE_PROFESSIONALS
 } from '../data/sampleData';
+import { generateBillNumber } from './gstEngine';
 
 export const STORAGE_KEYS = {
   CATEGORIES: 'hsm_categories_v2',
@@ -707,6 +708,26 @@ export class ShopStorage {
     return loadFromStorage<Payment[]>(STORAGE_KEYS.PAYMENTS, []);
   }
 
+  static getInvoicePrefix(): string {
+    const uid = currentNamespaceUid;
+    const key = uid ? `ak_${uid}_invoice_prefix` : 'ak_invoice_prefix';
+    return localStorage.getItem(key) || 'AK';
+  }
+
+  static generateNextBillNumber(customPrefix?: string): string {
+    const prefix = customPrefix || this.getInvoicePrefix() || 'AK';
+    const year = new Date().getFullYear();
+    const sales = this.getSales();
+    const countThisYear = sales.filter(s => {
+      try {
+        return new Date(s.date).getFullYear() === year;
+      } catch {
+        return false;
+      }
+    }).length;
+    return generateBillNumber(prefix, countThisYear);
+  }
+
   static recordPayment(payment: Payment): void {
     const payments = this.getPayments();
     const record: Payment = {
@@ -717,12 +738,38 @@ export class ShopStorage {
     payments.unshift(record);
     saveToStorage(STORAGE_KEYS.PAYMENTS, payments);
 
-    // Update contact balance
+    // Update contact balance and apply FIFO debt allocation across unpaid customer bills
     const contacts = this.getContacts();
     const cIndex = contacts.findIndex(c => c.id === payment.contactId);
     if (cIndex >= 0) {
       if (payment.type === 'customer_payment') {
         contacts[cIndex].creditBalance -= payment.amount;
+
+        // FIFO invoice allocation: Settle oldest unpaid customer bills first (Decision 3)
+        let unallocated = payment.amount;
+        const sales = this.getSales();
+        let salesUpdated = false;
+
+        // Sort customer's finalised unpaid bills chronologically (oldest first)
+        const customerUnpaidIndices = sales
+          .map((s, idx) => ({ s, idx }))
+          .filter(({ s }) => s.customerId === payment.contactId && s.status === 'finalised' && s.remainingBalance > 0)
+          .sort((a, b) => new Date(a.s.date).getTime() - new Date(b.s.date).getTime());
+
+        for (const { s, idx } of customerUnpaidIndices) {
+          if (unallocated <= 0) break;
+          const toApply = Math.min(unallocated, s.remainingBalance);
+          s.amountReceived = Math.round((s.amountReceived + toApply) * 100) / 100;
+          s.remainingBalance = Math.max(0, Math.round((s.remainingBalance - toApply) * 100) / 100);
+          sales[idx] = s;
+          salesUpdated = true;
+          this.notifyMutation('upsert', 'sales', s.id, s);
+          unallocated = Math.round((unallocated - toApply) * 100) / 100;
+        }
+
+        if (salesUpdated) {
+          saveToStorage(STORAGE_KEYS.SALES, sales);
+        }
       } else {
         contacts[cIndex].creditBalance += payment.amount;
       }
