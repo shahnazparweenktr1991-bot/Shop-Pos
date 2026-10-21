@@ -195,10 +195,12 @@ export function calculateBillTotals(params: BillTotalsParams): CalculatedBillTot
 }
 
 /**
- * Generate unique, durable bill number with random entropy to prevent collisions
+ * Generate unique, durable bill number with shop prefix, year, and sequence
+ * Format: {PREFIX}/{YYYY}/{0001} (e.g. AK/2026/0001)
  */
-export function generateBillNumber(prefix: string = 'AK/'): string {
-  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const entropy = Math.floor(1000 + Math.random() * 9000);
-  return `${prefix}${dateStr}-${entropy}`;
+export function generateBillNumber(prefix: string = 'AK', countThisYear: number = 0): string {
+  const cleanPrefix = prefix.replace(/\/+$/, '') || 'AK';
+  const year = new Date().getFullYear();
+  const seq = String(countThisYear + 1).padStart(4, '0');
+  return `${cleanPrefix}/${year}/${seq}`;
 }

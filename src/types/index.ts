@@ -155,6 +155,7 @@ export interface Contact {
   address?: string;
   gstNumber?: string;
   creditBalance: number; // Positive = Customer owes shop. Negative = Shop owes supplier.
+  creditLimit?: number; // Optional credit cap triggering warning when exceeded
   notes?: string;
   isSample?: boolean;
   recordOrigin?: 'sample' | 'user' | 'imported';
